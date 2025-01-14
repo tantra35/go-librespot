@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	librespot "github.com/devgianlu/go-librespot"
 	"math"
 	"net/http"
 	"os"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	librespot "github.com/devgianlu/go-librespot"
 
 	"github.com/devgianlu/go-librespot/apresolve"
 	"github.com/devgianlu/go-librespot/player"
@@ -110,10 +111,10 @@ func NewApp(cfg *Config) (app *App, err error) {
 func (app *App) newAppPlayer(ctx context.Context, creds any) (_ *AppPlayer, err error) {
 	appPlayer := &AppPlayer{
 		app:          app,
-		stop:         make(chan struct{}, 1),
-		logout:       app.logoutCh,
+		stopCh:       make(chan struct{}),
+		logoutCh:     app.logoutCh,
 		countryCode:  new(string),
-		volumeUpdate: make(chan float32, 1),
+		volumeUpdate: make(chan float32, 10),
 	}
 
 	// start a dummy timer for prefetching next media
@@ -234,12 +235,10 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 	}
 
 	// start zeroconf server and dispatch
-	z, err := zeroconf.NewZeroconf(app.log, app.cfg.ZeroconfPort, app.cfg.DeviceName, app.deviceId, app.deviceType)
+	z, err := zeroconf.NewZeroconf(app.log, app.cfg.ZeroconfPort, app.cfg.DeviceName, app.deviceId, app.deviceType, app.cfg.InterfacesToAdvertise)
 	if err != nil {
 		return fmt.Errorf("failed initializing zeroconf: %w", err)
 	}
-
-	var apiCh chan ApiRequest
 
 	currentPlayer, err := appPlayerFunc(ctx)
 	if err != nil {
@@ -250,65 +249,41 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 	if currentPlayer != nil {
 		log.Debugf("initializing zeroconf session, username: %s", currentPlayer.sess.Username())
 
-		apiCh = make(chan ApiRequest)
-		go currentPlayer.Run(ctx, apiCh)
+		go currentPlayer.Run(ctx, app.server.Receive())
 
 		// let zeroconf know that we already have a user
 		z.SetCurrentUser(currentPlayer.sess.Username())
 	}
 
-	// forward API requests to proper channel only if a session is present
-	go func() {
-		for {
-			select {
-			case req := <-app.server.Receive():
-				if currentPlayer == nil {
-					req.Reply(nil, ErrNoSession)
-					break
-				}
-
-				// if we are here the channel must exist
-				apiCh <- req
-			}
-		}
-	}()
-
 	// listen for logout events and unset session when that happens
 	go func() {
-		for {
-			select {
-			case p := <-app.logoutCh:
-				// check that the logout request is for the current player
-				if p != currentPlayer {
-					continue
-				}
+		for p := range app.logoutCh {
+			// check that the logout request is for the current player
+			if p != currentPlayer {
+				continue
+			}
 
-				currentPlayer.Close()
-				currentPlayer = nil
+			currentPlayer.Close()
+			currentPlayer = nil
 
-				// close the channel after setting the current session to nil
-				close(apiCh)
+			// restore the session if there is one.
+			// we will restore the session even if it's for the same user, but it shouldn't be an issue
+			newAppPlayer, err := appPlayerFunc(ctx)
+			if err != nil {
+				log.WithError(err).Errorf("failed restoring session after logout")
+			} else if newAppPlayer == nil {
+				// unset the zeroconf user
+				z.SetCurrentUser("")
+			} else {
+				// first create the channel and then assign the current session
+				currentPlayer = newAppPlayer
 
-				// restore the session if there is one.
-				// we will restore the session even if it's for the same user, but it shouldn't be an issue
-				newAppPlayer, err := appPlayerFunc(ctx)
-				if err != nil {
-					log.WithError(err).Errorf("failed restoring session after logout")
-				} else if newAppPlayer == nil {
-					// unset the zeroconf user
-					z.SetCurrentUser("")
-				} else {
-					// first create the channel and then assign the current session
-					apiCh = make(chan ApiRequest)
-					currentPlayer = newAppPlayer
+				go newAppPlayer.Run(ctx, app.server.Receive())
 
-					go newAppPlayer.Run(ctx, apiCh)
+				// let zeroconf know that we already have a user
+				z.SetCurrentUser(newAppPlayer.sess.Username())
 
-					// let zeroconf know that we already have a user
-					z.SetCurrentUser(newAppPlayer.sess.Username())
-
-					log.Debugf("restored session after logout, username: %s", currentPlayer.sess.Username())
-				}
+				app.log.Debugf("restored session after logout, username: %s", currentPlayer.sess.Username())
 			}
 		}
 	}()
@@ -318,9 +293,6 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 			currentPlayer.Close()
 			currentPlayer = nil
 
-			// close the channel after setting the current session to nil
-			close(apiCh)
-
 			// no need to unset the zeroconf user here as the new one will overwrite it anyway
 		}
 
@@ -329,12 +301,11 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 			Blob:     req.AuthBlob,
 		})
 		if err != nil {
-			log.WithError(err).Errorf("failed creating new session for %s from %s", req.Username, req.DeviceName)
+			app.log.WithError(err).Errorf("failed creating new session for %s from %s", req.Username, req.DeviceName)
 			return false
 		}
 
 		// first create the channel and then assign the current session
-		apiCh = make(chan ApiRequest)
 		currentPlayer = newAppPlayer
 
 		if app.cfg.Credentials.Zeroconf.PersistCredentials {
@@ -346,10 +317,10 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 				log.WithError(err).Errorf("failed persisting zeroconf credentials")
 			}
 
-			log.WithField("username", newAppPlayer.sess.Username()).Debugf("persisted zeroconf credentials")
+			app.log.WithField("username", newAppPlayer.sess.Username()).Debugf("persisted zeroconf credentials")
 		}
 
-		go newAppPlayer.Run(ctx, apiCh)
+		go newAppPlayer.Run(ctx, app.server.Receive())
 		return true
 	})
 }
@@ -383,6 +354,7 @@ type Config struct {
 	ZeroconfEnabled       bool      `koanf:"zeroconf_enabled"`
 	ZeroconfPort          int       `koanf:"zeroconf_port"`
 	DisableAutoplay       bool      `koanf:"disable_autoplay"`
+	InterfacesToAdvertise []string  `koanf:"interfaces_to_advertise"`
 	Server                struct {
 		Enabled     bool   `koanf:"enabled"`
 		Address     string `koanf:"address"`

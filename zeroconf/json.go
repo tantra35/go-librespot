@@ -6,10 +6,10 @@ type GetInfoResponse struct {
 	SpotifyError     int    `json:"spotifyError"`
 	Version          string `json:"version"`
 	LibraryVersion   string `json:"libraryVersion"`
-	AccountReq       string `json:"accountReq"`
+	AccountReq       string `json:"accountReq,omitempty"`
 	BrandDisplayName string `json:"brandDisplayName"`
 	ModelDisplayName string `json:"modelDisplayName"`
-	VoiceSupport     string `json:"voiceSupport"`
+	VoiceSupport     string `json:"voiceSupport,omitempty"`
 	Availability     string `json:"availability"`
 	ProductID        int    `json:"productID"`
 	TokenType        string `json:"tokenType"`
@@ -20,7 +20,7 @@ type GetInfoResponse struct {
 	RemoteName       string `json:"remoteName"`
 	PublicKey        string `json:"publicKey"`
 	DeviceType       string `json:"deviceType"`
-	ActiveUser       string `json:"activeUser"`
+	ActiveUser       string `json:"activeUser,omitempty"`
 }
 
 type AddUserResponse struct {

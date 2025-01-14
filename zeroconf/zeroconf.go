@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"sync"
 
-	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/dh"
 	devicespb "github.com/devgianlu/go-librespot/proto/spotify/connectstate/devices"
 	"github.com/grandcat/zeroconf"
@@ -46,7 +45,7 @@ type NewUserRequest struct {
 	result chan bool
 }
 
-func NewZeroconf(log librespot.Logger, port int, deviceName, deviceId string, deviceType devicespb.DeviceType) (_ *Zeroconf, err error) {
+func NewZeroconf(log *log.Entry, port int, deviceName, deviceId string, deviceType devicespb.DeviceType, interfacesToAdvertise []string) (_ *Zeroconf, err error) {
 	z := &Zeroconf{log: log, deviceId: deviceId, deviceName: deviceName, deviceType: deviceType}
 	z.reqsChan = make(chan NewUserRequest)
 
@@ -63,7 +62,18 @@ func NewZeroconf(log librespot.Logger, port int, deviceName, deviceId string, de
 	listenPort := z.listener.Addr().(*net.TCPAddr).Port
 	log.Infof("zeroconf server listening on port %d", listenPort)
 
-	z.server, err = zeroconf.Register(deviceName, "_spotify-connect._tcp", "local.", listenPort, []string{"CPath=/", "VERSION=1.0", "Stack=SP"}, nil)
+	var ifaces []net.Interface
+	for _, ifaceName := range interfacesToAdvertise {
+		liface, err := net.InterfaceByName(ifaceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get info for network interface %s: %w", ifaceName, err)
+		}
+
+		ifaces = append(ifaces, *liface)
+		log.Info(fmt.Sprintf("advertising on network interface %s", ifaceName))
+	}
+
+	z.server, err = zeroconf.Register(deviceName, "_spotify-connect._tcp", "local.", listenPort, []string{"CPath=/", "VERSION=1.0", "Stack=SP"}, ifaces)
 	if err != nil {
 		return nil, fmt.Errorf("failed registering zeroconf server: %w", err)
 	}
@@ -92,22 +102,23 @@ func (z *Zeroconf) handleGetInfo(writer http.ResponseWriter, _ *http.Request) er
 	currentUsername := z.currentUser
 	z.userLock.RUnlock()
 
+	// https://github.com/thlucas1/homeassistantcomponent_spotifyplus/issues/38
 	return json.NewEncoder(writer).Encode(GetInfoResponse{
 		Status:           101,
 		StatusString:     "OK",
 		SpotifyError:     0,
-		Version:          "2.7.1",
-		LibraryVersion:   librespot.VersionNumberString(),
-		AccountReq:       "PREMIUM",
+		Version:          "2.9.0",
+		LibraryVersion:   "3.166.69-g24821f73",
+		AccountReq:       "DONTCARE",
 		BrandDisplayName: "devgianlu",
 		ModelDisplayName: "go-librespot",
 		VoiceSupport:     "NO",
 		Availability:     "",
-		ProductID:        0,
+		ProductID:        2,
 		TokenType:        "default",
 		GroupStatus:      "NONE",
 		ResolverVersion:  "0",
-		Scope:            "streaming,client-authorization-universal",
+		Scope:            "streaming",
 
 		DeviceID:   z.deviceId,
 		RemoteName: z.deviceName,
