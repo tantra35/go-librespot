@@ -48,14 +48,31 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 	} else if opts.ChannelCount == 2 {
 		channelOpt = pulse.PlaybackStereo
 	} else {
+		client.Close()
 		return nil, fmt.Errorf("cannot play %d channels, pulse only supports mono and stereo", opts.ChannelCount)
 	}
+
 	volumeUpdates := make(chan proto.ChannelVolumes, 1)
-	out.stream, err = out.client.NewPlayback(pulse.Float32Reader(out.float32Reader), pulse.PlaybackSampleRate(out.sampleRate), channelOpt, pulse.PlaybackVolumeChanges(volumeUpdates))
+	lplaybackopts := []pulse.PlaybackOption{
+		pulse.PlaybackSampleRate(out.sampleRate),
+		pulse.PlaybackVolumeChanges(volumeUpdates),
+		channelOpt,
+	}
+
+	if opts.Device != "" {
+		lsink, err := client.SinkByID(opts.Device)
+		if err != nil {
+			client.Close()
+			return nil, fmt.Errorf("Can't find sink %s: %w", opts.Device, err)
+		}
+
+		lplaybackopts = append(lplaybackopts, pulse.PlaybackSink(lsink))
+	}
+
+	out.stream, err = out.client.NewPlayback(pulse.Float32Reader(out.float32Reader), lplaybackopts...)
 	if err != nil {
 		return nil, err
 	}
-
 	// Read the initial volume from PulseAudio.
 	// PulseAudio strongly recommends against setting a default volume at
 	// startup (especially if it's 100%), so instead we just follow the
@@ -71,11 +88,15 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 			volume := cvol.Avg()
 
 			out.volumeLock.Lock()
-			if volume != out.volume {
-				sendVolumeUpdate(opts.VolumeUpdate, float32(volume.Norm()))
-				out.volume = volume
+			if volume == out.volume {
+				out.volumeLock.Unlock()
+				continue
 			}
+
+			out.volume = volume
 			out.volumeLock.Unlock()
+
+			sendVolumeUpdate(opts.VolumeUpdate, float32(volume.Norm()))
 		}
 	}()
 
@@ -126,7 +147,10 @@ func (out *pulseAudioOutput) Resume() error {
 	// Start the stream. This will start reading samples from out.reader and
 	// push it to PulseAudio. It will do nothing if the playback is already
 	// started.
-	out.stream.Start()
+	go func() {
+		out.stream.Start()
+		log.Info("PulseAudio output initialised and started")
+	}()
 	return nil
 }
 
@@ -137,14 +161,12 @@ func (out *pulseAudioOutput) Drop() error {
 		// what's in the buffer. Presumably, all new samples from this point on
 		// are the new samples (isn't there a race condition here with
 		// SwitchingAudioSource?).
-		out.stream.Stop()
 		err := out.client.RawRequest(&proto.FlushPlaybackStream{
 			StreamIndex: out.stream.StreamIndex(),
 		}, nil)
 		if err != nil {
 			return fmt.Errorf("Drop: could not flush playback: %e", err)
 		}
-		out.stream.Start()
 	} else {
 		// This sometimes happens. But we don't need to do anything: we already
 		// flushed the buffer in Pause().
@@ -167,8 +189,9 @@ func (out *pulseAudioOutput) SetVolume(vol float32) {
 		return
 	}
 	out.volume = volume
-	sendVolumeUpdate(out.externalVolumeUpdate, vol)
 	out.volumeLock.Unlock()
+
+	sendVolumeUpdate(out.externalVolumeUpdate, vol)
 
 	cvol := proto.ChannelVolumes{volume}
 	err := out.stream.SetVolume(cvol)
@@ -184,5 +207,7 @@ func (out *pulseAudioOutput) Error() <-chan error {
 func (out *pulseAudioOutput) Close() error {
 	out.stream.Close()
 	out.client.Close()
+	close(out.err)
+
 	return nil
 }
