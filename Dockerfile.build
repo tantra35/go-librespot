@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 docker.io/golang:1.22.2-bullseye
+FROM --platform=linux/amd64 docker.io/golang:1.22.10-bullseye
 
 ENV COMMIT=dev
 ENV VERSION=0.0.0
