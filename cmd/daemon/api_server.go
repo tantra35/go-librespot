@@ -15,9 +15,9 @@ import (
 
 	"github.com/rs/cors"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	librespot "github.com/devgianlu/go-librespot"
-	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
 )
 
 const timeout = 10 * time.Second

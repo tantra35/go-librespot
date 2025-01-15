@@ -4,6 +4,7 @@ go 1.22.2
 
 require (
 	github.com/cenkalti/backoff/v4 v4.2.1
+	github.com/coder/websocket v1.8.12
 	github.com/devgianlu/shannon v0.0.0-20230613115856-82ec90b7fa7e
 	github.com/gofrs/flock v0.12.1
 	github.com/grandcat/zeroconf v1.0.0
@@ -22,14 +23,12 @@ require (
 	golang.org/x/net v0.26.0
 	golang.org/x/oauth2 v0.21.0
 	google.golang.org/protobuf v1.30.0
-	nhooyr.io/websocket v1.8.7
 )
 
 require (
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.0.0-alpha.1 // indirect
-	github.com/klauspost/compress v1.10.3 // indirect
 	github.com/knadh/koanf/maps v0.1.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/miekg/dns v1.1.54 // indirect

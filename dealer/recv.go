@@ -234,6 +234,7 @@ func (d *Dealer) handleRequest(rawMsg *RawMessage) {
 	}
 
 	// wait for response and send it
+	log.Debug("waiting for dealer request response")
 	success := <-resp
 	if err := d.sendReply(rawMsg.Key, success); err != nil {
 		log.WithError(err).Error("failed sending dealer reply")

@@ -4,11 +4,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	librespot "github.com/devgianlu/go-librespot"
 	"io"
 	"math"
 	"os"
 	"sync"
+
+	librespot "github.com/devgianlu/go-librespot"
 )
 
 type pipeOutput struct {
@@ -197,6 +198,7 @@ func (out *pipeOutput) Close() error {
 
 	out.closed = true
 	out.cond.Signal()
+	close(out.err)
 
 	return nil
 }

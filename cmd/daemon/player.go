@@ -21,14 +21,15 @@ import (
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	"github.com/devgianlu/go-librespot/session"
 	"github.com/devgianlu/go-librespot/tracks"
+	log "github.com/sirupsen/logrus"
 )
 
 type AppPlayer struct {
 	app  *App
 	sess *session.Session
 
-	stop   chan struct{}
-	logout chan *AppPlayer
+	stopCh   chan struct{}
+	logoutCh chan *AppPlayer
 
 	player            *player.Player
 	initialVolumeOnce sync.Once
@@ -94,7 +95,7 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 	} else if strings.HasPrefix(msg.Uri, "hm://connect-state/v1/connect/logout") {
 		// this should happen only with zeroconf enabled
 		p.app.log.Debugf("requested logout out from %s", p.sess.Username())
-		p.logout <- p
+		p.logoutCh <- p
 	} else if strings.HasPrefix(msg.Uri, "hm://connect-state/v1/cluster") {
 		var clusterUpdate connectpb.ClusterUpdate
 		if err := proto.Unmarshal(msg.Payload, &clusterUpdate); err != nil {
@@ -126,7 +127,7 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message)
 		p.schedulePrefetchNext()
 
 		if p.app.cfg.ZeroconfEnabled {
-			p.logout <- p
+			p.logoutCh <- p
 		}
 
 		p.app.server.Emit(&ApiEvent{
@@ -158,6 +159,7 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 		}
 		p.state.lastTransferTimestamp = transferState.Playback.Timestamp
 
+		log.Debugf("[ruslan] tracks.NewTrackListFromContext(ctx, p.app.log, p.sess.Spclient(), transferState.CurrentSession.Context), begin")
 		ctxTracks, err := tracks.NewTrackListFromContext(ctx, p.app.log, p.sess.Spclient(), transferState.CurrentSession.Context)
 		if err != nil {
 			return fmt.Errorf("failed creating track list: %w", err)
@@ -166,6 +168,7 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 		p.state.setActive(true)
 		p.state.player.IsPlaying = false
 		p.state.player.IsBuffering = false
+		log.Debugf("[ruslan] tracks.NewTrackListFromContext(ctx, p.app.log, p.sess.Spclient(), transferState.CurrentSession.Context), end")
 
 		// options
 		p.state.player.Options = transferState.Options
@@ -221,11 +224,15 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 			p.state.queueID = max(p.state.queueID, n)
 		}
 
+		log.Debug("Add Traks to queue begin")
+
 		// add all tracks from queue
 		for _, track := range transferState.Queue.Tracks {
 			ctxTracks.AddToQueue(track)
 		}
 		ctxTracks.SetPlayingQueue(transferState.Queue.IsPlayingQueue)
+
+		log.Debug("Add Traks to queue end")
 
 		p.state.tracks = ctxTracks
 		p.state.player.Track = ctxTracks.CurrentTrack()
@@ -545,12 +552,13 @@ func (p *AppPlayer) handleApiRequest(ctx context.Context, req ApiRequest) (any, 
 }
 
 func (p *AppPlayer) Close() {
-	p.stop <- struct{}{}
+	close(p.stopCh)
 	p.player.Close()
 	p.sess.Close()
 }
 
 func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest) {
+	log.Infof("[ruslan] AppPlayer player loop begin")
 	err := p.sess.Dealer().Connect(ctx)
 	if err != nil {
 		p.app.log.WithError(err).Error("failed connecting to dealer")
@@ -566,31 +574,47 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest) {
 	volumeTimer := time.NewTimer(time.Minute)
 	volumeTimer.Stop() // don't emit a volume change event at start
 
+loop:
 	for {
+		log.Debug("[ruslan] AppPlayer player loop iteration begin")
+
 		select {
-		case <-p.stop:
-			return
+		case <-p.stopCh:
+			break loop
+
 		case pkt := <-apRecv:
 			if err := p.handleAccesspointPacket(pkt.Type, pkt.Payload); err != nil {
 				p.app.log.WithError(err).Warn("failed handling accesspoint packet")
 			}
+
 		case msg := <-msgRecv:
+			log.Debug("[ruslan] AppPlayer player loop iteration received dealer message begin")
 			if err := p.handleDealerMessage(ctx, msg); err != nil {
 				p.app.log.WithError(err).Warn("failed handling dealer message")
 			}
+			log.Debug("[ruslan] AppPlayer player loop iteration received dealer message end")
+
 		case req := <-reqRecv:
-			if err := p.handleDealerRequest(ctx, req); err != nil {
+			log.Debug("[ruslan] AppPlayer player loop iteration received dealer request begin")
+			lreply := false
+			err := p.handleDealerRequest(ctx, req)
+			if err != nil {
 				p.app.log.WithError(err).Warn("failed handling dealer request")
-				req.Reply(false)
 			} else {
 				p.app.log.Debugf("sending successful reply for dealer request")
-				req.Reply(true)
+				lreply = true
 			}
+
+			req.Reply(lreply)
+			log.Debug("[ruslan] AppPlayer player loop iteration received dealer request end")
+
 		case req := <-apiRecv:
 			data, err := p.handleApiRequest(ctx, req)
 			req.Reply(data, err)
+
 		case ev := <-playerRecv:
 			p.handlePlayerEvent(ctx, &ev)
+
 		case volume := <-p.volumeUpdate:
 			// Received a new volume: from Spotify Connect, from the REST API,
 			// or from the system volume mixer.
@@ -600,9 +624,15 @@ func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest) {
 			// matches the Spotify Web Player.
 			p.state.device.Volume = uint32(volume * player.MaxStateVolume)
 			volumeTimer.Reset(time.Second)
+
 		case <-volumeTimer.C:
 			// We've gone 1 second without update, send the new value now.
 			p.volumeUpdated(ctx)
 		}
+
+		log.Debug("[ruslan] AppPlayer player loop iteration end")
 	}
+
+	p.sess.Dealer().Close()
+	log.Debug("[ruslan] AppPlayer player loop end")
 }

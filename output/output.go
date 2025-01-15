@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	librespot "github.com/devgianlu/go-librespot"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type Output interface {
@@ -139,18 +141,9 @@ func NewOutput(options *NewOutputOptions) (Output, error) {
 // concurrently. If so, it will do a non-blocking send removing old values from
 // the start of the queue.
 func sendVolumeUpdate(ch chan float32, val float32) {
-	if cap(ch) == 0 {
-		panic("channel must be buffered") // sanity check
-	}
-
-	// If there is a value in the channel buffer, remove it.
 	select {
-	case <-ch:
+	case ch <- val:
 	default:
+		log.Warn("[ruslan] dropping volume update")
 	}
-
-	// Send the new value.
-	// This should be non-blocking, assuming there's only a single call to
-	// sendVolumeUpdate at a time.
-	ch <- val
 }

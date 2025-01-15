@@ -13,6 +13,7 @@ import (
 	"github.com/devgianlu/go-librespot/proto/spotify/metadata"
 	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/vorbis"
+	log "github.com/sirupsen/logrus"
 )
 
 const SampleRate = 44100
@@ -165,9 +166,11 @@ func NewPlayer(opts *Options) (*Player, error) {
 }
 
 func (p *Player) manageLoop() {
+	log.Debug("[ruslan] player manageLoop begin")
+
 	// currently available output device
 	var out output.Output
-	outErr := make(<-chan error)
+	outErr := make(chan error)
 
 	// initial volume is 1
 	volume := float32(1)
@@ -177,8 +180,12 @@ func (p *Player) manageLoop() {
 
 loop:
 	for {
+		log.Debug("[ruslan] player manageLoop iteration begin")
+
 		select {
 		case cmd := <-p.cmd:
+			log.Debugf("[ruslan] player manageLoop iteration player command %d begin", cmd.typ)
+
 			switch cmd.typ {
 			case playerCmdSet:
 				data := cmd.data.(playerCmdDataSet)
@@ -187,6 +194,8 @@ loop:
 					cmd.resp <- nil
 					break
 				}
+
+				log.Debugf("[ruslan] player manageLoop iteration playerCmdSet controlpoint 00")
 
 				// create a new output device if needed
 				if out == nil {
@@ -197,9 +206,15 @@ loop:
 						break
 					}
 
-					outErr = out.Error()
+					go func(_outErr <-chan error) {
+						for err := range _outErr {
+							outErr <- err
+						}
+					}(out.Error())
 					p.log.Debugf("created new output device")
 				}
+
+				log.Debugf("[ruslan] player manageLoop iteration playerCmdSet controlpoint 01")
 
 				// set source
 				source.SetPrimary(data.source)
@@ -215,18 +230,26 @@ loop:
 					}
 				}
 
+				log.Debugf("[ruslan] player manageLoop iteration playerCmdSet controlpoint 02")
+
 				if data.drop {
-					_ = out.Drop()
+					out.Drop()
 				}
+
+				log.Debugf("[ruslan] player manageLoop iteration playerCmdSet controlpoint 03")
 
 				p.startedPlaying = time.Now()
 				cmd.resp <- nil
+
+				log.Debugf("[ruslan] player manageLoop iteration playerCmdSet controlpoint 04")
 
 				if data.paused {
 					p.ev <- Event{Type: EventTypePaused}
 				} else {
 					p.ev <- Event{Type: EventTypePlaying}
 				}
+
+				log.Debugf("[ruslan] player manageLoop iteration playerCmdSet controlpoint 05")
 			case playerCmdPlay:
 				if out != nil {
 					if err := out.Resume(); err != nil {
@@ -251,10 +274,8 @@ loop:
 				}
 			case playerCmdStop:
 				if out != nil {
-					_ = out.Close()
+					out.Close()
 					out = nil
-					outErr = make(<-chan error)
-
 					p.log.Tracef("closed output device because of stop command")
 				}
 
@@ -295,33 +316,37 @@ loop:
 			default:
 				panic("unknown player command")
 			}
+
+			log.Debugf("[ruslan] player manageLoop iteration player command %d end", cmd.typ)
 		case err := <-outErr:
 			if err != nil {
 				p.log.WithError(err).Errorf("output device failed")
 			}
 
 			// the current output device has exited, clean it up
-			_ = out.Close()
+			out.Close()
 			out = nil
-			outErr = make(<-chan error)
-
 			p.log.Tracef("cleared closed output device")
 
 			// FIXME: this is called even if not needed, like when autoplay starts
 			p.ev <- Event{Type: EventTypeStopped}
+
 		case <-source.Done():
 			p.ev <- Event{Type: EventTypeNotPlaying}
 		}
+
+		log.Debug("[ruslan] player manageLoop iteration end")
 	}
 
 	close(p.cmd)
-
-	_ = source.Close()
+	source.Close()
 
 	if out != nil {
-		_ = out.Close()
+		out.Close()
 		out = nil
 	}
+
+	log.Debug("[ruslan] player manageLoop end")
 }
 
 func (p *Player) HasBeenPlayingFor() time.Duration {

@@ -226,6 +226,7 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 		},
 	})
 
+	p.app.log.Debug("[ruslan] p.player.NewStream(ctx, p.app.client, *spotId, p.app.cfg.Bitrate, trackPosition) begin")
 	var prefetched bool
 	if p.secondaryStream != nil && p.secondaryStream.Is(*spotId) {
 		p.primaryStream = p.secondaryStream
@@ -241,6 +242,7 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 			return fmt.Errorf("failed creating stream for %s: %w", spotId, err)
 		}
 	}
+	p.app.log.Debug("[ruslan] p.player.NewStream(ctx, p.app.client, *spotId, p.app.cfg.Bitrate, trackPosition) end")
 
 	if err := p.player.SetPrimaryStream(p.primaryStream.Source, paused, drop); err != nil {
 		return fmt.Errorf("failed setting stream for %s: %w", spotId, err)

@@ -8,6 +8,7 @@ import (
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/jfreymuth/pulse"
 	"github.com/jfreymuth/pulse/proto"
+	log "github.com/sirupsen/logrus"
 )
 
 type pulseAudioOutput struct {

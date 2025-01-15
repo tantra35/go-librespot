@@ -445,6 +445,7 @@ func (out *alsaOutput) Close() error {
 	}
 
 	out.closed = true
+	close(out.err)
 
 	return nil
 }
