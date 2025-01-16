@@ -6,12 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	playlist4pb "github.com/devgianlu/go-librespot/proto/spotify/playlist4"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+
+	playlist4pb "github.com/devgianlu/go-librespot/proto/spotify/playlist4"
 
 	"github.com/cenkalti/backoff/v4"
 	librespot "github.com/devgianlu/go-librespot"
@@ -239,7 +240,7 @@ func (c *Spclient) MetadataForTrack(ctx context.Context, track librespot.Spotify
 		return nil, err
 	}
 
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("invalid status code from track metadata: %d", resp.StatusCode)

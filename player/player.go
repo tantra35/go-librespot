@@ -436,7 +436,9 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 
 	var media *librespot.Media
 	var file *metadata.AudioFile
-	if spotId.Type() == librespot.SpotifyIdTypeTrack {
+
+	switch spotId.Type() {
+	case librespot.SpotifyIdTypeTrack:
 		trackMeta, err := p.sp.MetadataForTrack(ctx, spotId)
 		if err != nil {
 			return nil, fmt.Errorf("failed getting track metadata: %w", err)
@@ -463,7 +465,8 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		if file == nil {
 			return nil, librespot.ErrNoSupportedFormats
 		}
-	} else if spotId.Type() == librespot.SpotifyIdTypeEpisode {
+
+	case librespot.SpotifyIdTypeEpisode:
 		episodeMeta, err := p.sp.MetadataForEpisode(ctx, spotId)
 		if err != nil {
 			return nil, fmt.Errorf("failed getting episode metadata: %w", err)
@@ -478,7 +481,8 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		if file == nil {
 			return nil, librespot.ErrNoSupportedFormats
 		}
-	} else {
+
+	default:
 		return nil, fmt.Errorf("unsupported spotify type: %s", spotId.Type())
 	}
 
