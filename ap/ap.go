@@ -19,6 +19,7 @@ import (
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/dh"
 	pb "github.com/devgianlu/go-librespot/proto/spotify"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/exp/slices"
 	"golang.org/x/net/proxy"
@@ -48,19 +49,18 @@ type Accesspoint struct {
 	conn    net.Conn
 	encConn *shannonConn
 
-	stop              bool
-	pongAckTickerStop chan struct{}
-	recvLoopStop      chan struct{}
-	recvLoopOnce      sync.Once
-	recvChans         map[PacketType][]chan Packet
-	recvChansLock     sync.RWMutex
-	lastPongAck       time.Time
-	lastPongAckLock   sync.Mutex
+	stop            bool
+	recvLoopStopCh  chan struct{}
+	recvLoopOnce    sync.Once
+	recvChans       map[PacketType][]chan Packet
+	recvChansLock   sync.RWMutex
+	lastPongAck     time.Time
+	lastPongAckLock sync.Mutex
 
-	// connMu is held for writing when performing reconnection and for reading mainly when accessing welcome
+	// lock is held for writing when performing reconnection and for reading mainly when accessing welcome
 	// or sending packets. If it's not held, a valid connection (and APWelcome) is available. Be careful not to deadlock
 	// anything with this.
-	connMu  sync.RWMutex
+	lock    sync.RWMutex
 	welcome *pb.APWelcome
 }
 
@@ -179,16 +179,13 @@ func (ap *Accesspoint) ConnectBlob(ctx context.Context, username string, encrypt
 }
 
 func (ap *Accesspoint) Connect(ctx context.Context, creds *pb.LoginCredentials) error {
-	ap.connMu.Lock()
-	defer ap.connMu.Unlock()
+	ap.lock.Lock()
+	defer ap.lock.Unlock()
 
 	return ap.connect(ctx, creds)
 }
 
 func (ap *Accesspoint) connect(ctx context.Context, creds *pb.LoginCredentials) error {
-	ap.recvLoopStop = make(chan struct{}, 1)
-	ap.pongAckTickerStop = make(chan struct{}, 1)
-
 	if err := ap.init(ctx); err != nil {
 		return err
 	}
@@ -214,27 +211,29 @@ func (ap *Accesspoint) connect(ctx context.Context, creds *pb.LoginCredentials) 
 		return fmt.Errorf("failed authenticating: %w", err)
 	}
 
+	ap.recvLoopStopCh = make(chan struct{}, 1)
 	return nil
 }
 
 func (ap *Accesspoint) Close() {
-	ap.connMu.Lock()
-	defer ap.connMu.Unlock()
+	ap.lock.Lock()
+	defer ap.lock.Unlock()
 
-	ap.stop = true
+	if !ap.stop {
+		ap.stop = true
+		close(ap.recvLoopStopCh)
 
-	if ap.conn == nil {
-		return
+		if ap.conn == nil {
+			return
+		}
+
+		ap.conn.Close()
 	}
-
-	ap.recvLoopStop <- struct{}{}
-	ap.pongAckTickerStop <- struct{}{}
-	_ = ap.conn.Close()
 }
 
 func (ap *Accesspoint) Send(ctx context.Context, pktType PacketType, payload []byte) error {
-	ap.connMu.RLock()
-	defer ap.connMu.RUnlock()
+	ap.lock.RLock()
+	defer ap.lock.RUnlock()
 	return ap.encConn.sendPacket(ctx, pktType, payload)
 }
 
@@ -257,7 +256,12 @@ func (ap *Accesspoint) Receive(types ...PacketType) <-chan Packet {
 func (ap *Accesspoint) startReceiving() {
 	ap.recvLoopOnce.Do(func() {
 		ap.log.Tracef("starting accesspoint recv loop")
-		go ap.recvLoop()
+		lctx, cancelFn := context.WithCancel(context.Background())
+		go ap.recvLoop(lctx)
+		go func() {
+			<-ap.recvLoopStopCh
+			cancelFn()
+		}()
 
 		// set last ping in the future
 		ap.lastPongAck = time.Now().Add(pongAckInterval)
@@ -265,36 +269,43 @@ func (ap *Accesspoint) startReceiving() {
 	})
 }
 
-func (ap *Accesspoint) recvLoop() {
-loop:
-	for {
-		select {
-		case <-ap.recvLoopStop:
-			break loop
-		default:
+func (ap *Accesspoint) isStoped() bool {
+	ap.lock.RLock()
+	defer ap.lock.RUnlock()
+
+	return ap.stop
+}
+
+func (ap *Accesspoint) recvLoop(_ctx context.Context) {
+	ap.log.Debug("[ruslan] accesspoint recv loop begin")
+
+	for !ap.isStoped() {
+	loop:
+		for !ap.isStoped() {
 			// no need to hold the connMu since reconnection happens in this routine
-			pkt, payload, err := ap.encConn.receivePacket(context.TODO())
+			pkt, payload, err := ap.encConn.receivePacket(_ctx)
 			if err != nil {
-				if !ap.stop {
+				if !ap.isStoped() {
 					ap.log.WithError(err).Errorf("failed receiving packet")
 				}
 
-				break loop
+				break
 			}
 
 			switch pkt {
 			case PacketTypePing:
 				ap.log.Tracef("received accesspoint ping")
-				if err := ap.encConn.sendPacket(context.TODO(), PacketTypePong, payload); err != nil {
+				if err := ap.encConn.sendPacket(_ctx, PacketTypePong, payload); err != nil {
 					ap.log.WithError(err).Errorf("failed sending Pong packet")
 					break loop
 				}
+
 			case PacketTypePongAck:
 				ap.log.Tracef("received accesspoint pong ack")
 				ap.lastPongAckLock.Lock()
 				ap.lastPongAck = time.Now()
 				ap.lastPongAckLock.Unlock()
-				continue
+
 			default:
 				ap.recvChansLock.RLock()
 				ll, _ := ap.recvChans[pkt]
@@ -311,25 +322,22 @@ loop:
 				}
 			}
 		}
-	}
 
-	// always close as we might end up here because of application errors
-	_ = ap.conn.Close()
+		// always close as we might end up here because of application errors
+		ap.conn.Close()
 
-	// if we shouldn't stop, try to reconnect
-	if !ap.stop {
-		ap.connMu.Lock()
-		if err := backoff.Retry(ap.reconnect, backoff.NewExponentialBackOff()); err != nil {
-			ap.log.WithError(err).Errorf("failed reconnecting accesspoint")
-			ap.connMu.Unlock()
+		// if we shouldn't stop, try to reconnect
+		if !ap.isStoped() {
+			err := backoff.Retry(func() error {
+				return ap.reconnect(_ctx)
+			}, backoff.NewExponentialBackOff())
+			if err != nil {
+				ap.log.WithError(err).Errorf("failed reconnecting accesspoint")
+				log.Exit(1)
+			}
 
-			// something went very wrong, give up
-			ap.Close()
+			ap.log.Debugf("re-established accesspoint connection")
 		}
-		ap.connMu.Unlock()
-
-		// reconnection was successful, do not close receivers
-		return
 	}
 
 	ap.recvChansLock.RLock()
@@ -345,6 +353,8 @@ loop:
 			}
 		}
 	}
+
+	ap.log.Debug("[ruslan] accesspoint recv loop end")
 }
 
 func (ap *Accesspoint) pongAckTicker() {
@@ -353,8 +363,9 @@ func (ap *Accesspoint) pongAckTicker() {
 loop:
 	for {
 		select {
-		case <-ap.pongAckTickerStop:
+		case <-ap.recvLoopStopCh:
 			break loop
+
 		case <-ticker.C:
 			ap.lastPongAckLock.Lock()
 			timePassed := time.Since(ap.lastPongAck)
@@ -364,8 +375,7 @@ loop:
 
 				// closing the connection should make the read on the "recvLoop" fail,
 				// continue hoping for a new connection
-				_ = ap.conn.Close()
-				continue
+				ap.conn.Close()
 			}
 		}
 	}
@@ -373,24 +383,18 @@ loop:
 	ticker.Stop()
 }
 
-func (ap *Accesspoint) reconnect() (err error) {
+func (ap *Accesspoint) reconnect(_ctx context.Context) (err error) {
 	if ap.welcome == nil {
 		return backoff.Permanent(fmt.Errorf("cannot reconnect without APWelcome"))
 	}
 
-	if err = ap.connect(context.TODO(), &pb.LoginCredentials{
+	err = ap.connect(_ctx, &pb.LoginCredentials{
 		Typ:      ap.welcome.ReusableAuthCredentialsType,
 		Username: ap.welcome.CanonicalUsername,
 		AuthData: ap.welcome.ReusableAuthCredentials,
-	}); err != nil {
-		return err
-	}
+	})
 
-	// if we are here the "recvLoop" has already died, restart it
-	go ap.recvLoop()
-
-	ap.log.Debugf("re-established accesspoint connection")
-	return nil
+	return err
 }
 
 func (ap *Accesspoint) performKeyExchange() ([]byte, error) {
@@ -537,8 +541,8 @@ func (ap *Accesspoint) authenticate(ctx context.Context, credentials *pb.LoginCr
 }
 
 func (ap *Accesspoint) Username() string {
-	ap.connMu.RLock()
-	defer ap.connMu.RUnlock()
+	ap.lock.RLock()
+	defer ap.lock.RUnlock()
 
 	if ap.welcome == nil {
 		panic("accesspoint not authenticated")
@@ -548,8 +552,8 @@ func (ap *Accesspoint) Username() string {
 }
 
 func (ap *Accesspoint) StoredCredentials() []byte {
-	ap.connMu.RLock()
-	defer ap.connMu.RUnlock()
+	ap.lock.RLock()
+	defer ap.lock.RUnlock()
 
 	if ap.welcome == nil {
 		panic("accesspoint not authenticated")
