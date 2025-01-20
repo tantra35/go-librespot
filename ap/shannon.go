@@ -65,7 +65,7 @@ func (c *shannonConn) sendPacket(ctx context.Context, pktType PacketType, payloa
 
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.conn.SetDeadline(deadline)
-		defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+		defer func() { c.conn.SetDeadline(time.Time{}) }()
 	}
 
 	// write it all out

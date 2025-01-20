@@ -582,19 +582,31 @@ loop:
 		case <-p.stopCh:
 			break loop
 
-		case pkt := <-apRecv:
+		case pkt, lok := <-apRecv:
+			if !lok {
+				break
+			}
+
 			if err := p.handleAccesspointPacket(pkt.Type, pkt.Payload); err != nil {
 				p.app.log.WithError(err).Warn("failed handling accesspoint packet")
 			}
 
-		case msg := <-msgRecv:
+		case msg, lok := <-msgRecv:
+			if !lok {
+				break
+			}
+
 			log.Debug("[ruslan] AppPlayer player loop iteration received dealer message begin")
 			if err := p.handleDealerMessage(ctx, msg); err != nil {
 				p.app.log.WithError(err).Warn("failed handling dealer message")
 			}
 			log.Debug("[ruslan] AppPlayer player loop iteration received dealer message end")
 
-		case req := <-reqRecv:
+		case req, lok := <-reqRecv:
+			if !lok {
+				break
+			}
+
 			log.Debug("[ruslan] AppPlayer player loop iteration received dealer request begin")
 			lreply := false
 			err := p.handleDealerRequest(ctx, req)
@@ -608,11 +620,19 @@ loop:
 			req.Reply(lreply)
 			log.Debug("[ruslan] AppPlayer player loop iteration received dealer request end")
 
-		case req := <-apiRecv:
+		case req, lok := <-apiRecv:
+			if !lok {
+				break
+			}
+
 			data, err := p.handleApiRequest(ctx, req)
 			req.Reply(data, err)
 
-		case ev := <-playerRecv:
+		case ev, lok := <-playerRecv:
+			if !lok {
+				break
+			}
+
 			p.handlePlayerEvent(ctx, &ev)
 
 		case volume := <-p.volumeUpdate:

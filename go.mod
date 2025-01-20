@@ -2,6 +2,8 @@ module github.com/devgianlu/go-librespot
 
 go 1.22.2
 
+replace github.com/jfreymuth/pulse => github.com/tantra35/pulse v0.0.0-20250119180117-8660f24ebdfc
+
 require (
 	github.com/cenkalti/backoff/v4 v4.2.1
 	github.com/coder/websocket v1.8.12

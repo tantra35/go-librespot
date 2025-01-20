@@ -150,7 +150,7 @@ func (out *pulseAudioOutput) Resume() error {
 	// started.
 	go func() {
 		out.stream.Start()
-		log.Info("PulseAudio output initialised and started")
+		log.Info("PulseAudio output started")
 	}()
 	return nil
 }
@@ -162,12 +162,18 @@ func (out *pulseAudioOutput) Drop() error {
 		// what's in the buffer. Presumably, all new samples from this point on
 		// are the new samples (isn't there a race condition here with
 		// SwitchingAudioSource?).
+		out.stream.Stop()
 		err := out.client.RawRequest(&proto.FlushPlaybackStream{
 			StreamIndex: out.stream.StreamIndex(),
 		}, nil)
 		if err != nil {
 			return fmt.Errorf("Drop: could not flush playback: %e", err)
 		}
+
+		go func() {
+			out.stream.Start()
+			log.Info("PulseAudio output started after drop")
+		}()
 	} else {
 		// This sometimes happens. But we don't need to do anything: we already
 		// flushed the buffer in Pause().

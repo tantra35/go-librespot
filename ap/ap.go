@@ -211,7 +211,10 @@ func (ap *Accesspoint) connect(ctx context.Context, creds *pb.LoginCredentials) 
 		return fmt.Errorf("failed authenticating: %w", err)
 	}
 
-	ap.recvLoopStopCh = make(chan struct{}, 1)
+	if ap.recvLoopStopCh == nil {
+		ap.recvLoopStopCh = make(chan struct{})
+	}
+
 	return nil
 }
 
@@ -241,7 +244,7 @@ func (ap *Accesspoint) Receive(types ...PacketType) <-chan Packet {
 	ch := make(chan Packet)
 	ap.recvChansLock.Lock()
 	for _, type_ := range types {
-		ll, _ := ap.recvChans[type_]
+		ll := ap.recvChans[type_]
 		ll = append(ll, ch)
 		ap.recvChans[type_] = ll
 	}
@@ -308,7 +311,7 @@ func (ap *Accesspoint) recvLoop(_ctx context.Context) {
 
 			default:
 				ap.recvChansLock.RLock()
-				ll, _ := ap.recvChans[pkt]
+				ll := ap.recvChans[pkt]
 				ap.recvChansLock.RUnlock()
 
 				handled := false

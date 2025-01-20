@@ -27,13 +27,19 @@ type KeyProvider struct {
 
 	recvLoopOnce sync.Once
 
-	reqChan  chan keyRequest
-	stopChan chan struct{}
+	reqChan chan keyRequest
+	stopCh  chan struct{}
+
+	reqs     map[uint32]keyRequest
+	seq      uint32
+	reqsLock sync.RWMutex
 }
 
 type keyRequest struct {
 	gid    []byte
 	fileId []byte
+	seq    uint32
+	ctx    context.Context
 	resp   chan keyResponse
 }
 
@@ -43,9 +49,9 @@ type keyResponse struct {
 }
 
 func NewAudioKeyProvider(log librespot.Logger, ap *ap.Accesspoint) *KeyProvider {
-	p := &KeyProvider{log: log, ap: ap}
+	p := &KeyProvider{log: log, ap: ap, reqs: make(map[uint32]keyRequest)}
 	p.reqChan = make(chan keyRequest)
-	p.stopChan = make(chan struct{}, 1)
+	p.stopCh = make(chan struct{}, 1)
 	return p
 }
 
@@ -56,31 +62,34 @@ func (p *KeyProvider) startReceiving() {
 func (p *KeyProvider) recvLoop() {
 	ch := p.ap.Receive(ap.PacketTypeAesKey, ap.PacketTypeAesKeyError)
 
-	seq := uint32(0)
-	reqs := map[uint32]keyRequest{}
-
 	for {
 		select {
-		case <-p.stopChan:
+		case <-p.stopCh:
 			return
 		case pkt := <-ch:
 			resp := bytes.NewReader(pkt.Payload)
 			var respSeq uint32
 			_ = binary.Read(resp, binary.BigEndian, &respSeq)
 
-			req, ok := reqs[respSeq]
+			p.reqsLock.RLock()
+			req, ok := p.reqs[respSeq]
+			p.reqsLock.RUnlock()
 			if !ok {
 				p.log.Warnf("received aes key with invalid sequence: %d", respSeq)
 				continue
 			}
 
-			delete(reqs, respSeq)
+			p.reqsLock.Lock()
+			delete(p.reqs, respSeq)
+			p.reqsLock.Unlock()
 
 			switch pkt.Type {
 			case ap.PacketTypeAesKey:
 				key := make([]byte, 16)
 				_, _ = resp.Read(key)
 				req.resp <- keyResponse{key: key}
+				p.log.Debugf("received aes key for file %s, gid: %s", hex.EncodeToString(req.fileId), librespot.GidToBase62(req.gid))
+
 			case ap.PacketTypeAesKeyError:
 				var errCode uint16
 				_ = binary.Read(resp, binary.BigEndian, &errCode)
@@ -89,21 +98,21 @@ func (p *KeyProvider) recvLoop() {
 				panic("unexpected packet type")
 			}
 		case req := <-p.reqChan:
-			reqSeq := seq
-			seq++
-
 			var buf bytes.Buffer
 			_, _ = buf.Write(req.fileId)
 			_, _ = buf.Write(req.gid)
-			_ = binary.Write(&buf, binary.BigEndian, reqSeq)
+			_ = binary.Write(&buf, binary.BigEndian, req.seq)
 			_ = binary.Write(&buf, binary.BigEndian, uint16(0))
 
-			reqs[reqSeq] = req
-
-			if err := p.ap.Send(context.TODO(), ap.PacketTypeRequestKey, buf.Bytes()); err != nil {
-				delete(reqs, reqSeq)
+			if err := p.ap.Send(req.ctx, ap.PacketTypeRequestKey, buf.Bytes()); err != nil {
+				p.reqsLock.Lock()
+				delete(p.reqs, req.seq)
+				p.reqsLock.Unlock()
 				req.resp <- keyResponse{err: fmt.Errorf("failed sending key request for file %s, gid: %s: %w",
 					hex.EncodeToString(req.fileId), librespot.GidToBase62(req.gid), err)}
+
+				p.log.Errorf("Can't request aes key for file %s, gid: %s, due: %s", hex.EncodeToString(req.fileId), librespot.GidToBase62(req.gid), err)
+				break
 			}
 
 			p.log.Debugf("requested aes key for file %s, gid: %s", hex.EncodeToString(req.fileId), librespot.GidToBase62(req.gid))
@@ -114,7 +123,13 @@ func (p *KeyProvider) recvLoop() {
 func (p *KeyProvider) Request(ctx context.Context, gid []byte, fileId []byte) ([]byte, error) {
 	p.startReceiving()
 
-	req := keyRequest{gid: gid, fileId: fileId, resp: make(chan keyResponse, 1)}
+	p.reqsLock.Lock()
+	reqSeq := p.seq
+	p.seq++
+	req := keyRequest{gid: gid, fileId: fileId, seq: reqSeq, ctx: ctx, resp: make(chan keyResponse, 1)}
+	p.reqs[reqSeq] = req
+	p.reqsLock.Unlock()
+
 	p.reqChan <- req
 
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -122,7 +137,10 @@ func (p *KeyProvider) Request(ctx context.Context, gid []byte, fileId []byte) ([
 
 	select {
 	case <-ctx.Done():
-		return nil, context.DeadlineExceeded
+		p.reqsLock.Lock()
+		delete(p.reqs, reqSeq)
+		p.reqsLock.Unlock()
+		return nil, ctx.Err()
 	case resp := <-req.resp:
 		if resp.err != nil {
 			return nil, resp.err
@@ -133,5 +151,5 @@ func (p *KeyProvider) Request(ctx context.Context, gid []byte, fileId []byte) ([
 }
 
 func (p *KeyProvider) Close() {
-	p.stopChan <- struct{}{}
+	close(p.stopCh)
 }

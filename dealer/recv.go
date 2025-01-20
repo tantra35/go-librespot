@@ -29,14 +29,18 @@ type requestReceiver struct {
 }
 
 type Request struct {
-	resp chan bool
+	resp   chan bool
+	stopCh chan struct{}
 
 	MessageIdent string
 	Payload      RequestPayload
 }
 
 func (req Request) Reply(success bool) {
-	req.resp <- success
+	select {
+	case req.resp <- success:
+	case <-req.stopCh:
+	}
 }
 
 type RequestPayload struct {
@@ -229,6 +233,7 @@ func (d *Dealer) handleRequest(rawMsg *RawMessage) {
 	resp := make(chan bool)
 	recv.c <- Request{
 		resp:         resp,
+		stopCh:       d.stopCh,
 		MessageIdent: rawMsg.MessageIdent,
 		Payload:      payload,
 	}
