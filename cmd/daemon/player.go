@@ -69,7 +69,7 @@ func (p *AppPlayer) handleAccesspointPacket(pktType ap.PacketType, payload []byt
 	}
 }
 
-func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg dealer.Message) error {
+func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg *dealer.Message) error {
 	if strings.HasPrefix(msg.Uri, "hm://pusher/v1/connections/") {
 		p.spotConnId = msg.Headers["Spotify-Connection-Id"]
 		p.app.log.Debugf("received connection id: %s", p.spotConnId)
@@ -355,7 +355,7 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 	}
 }
 
-func (p *AppPlayer) handleDealerRequest(ctx context.Context, req dealer.Request) error {
+func (p *AppPlayer) handleDealerRequest(ctx context.Context, req *dealer.Request) error {
 	switch req.MessageIdent {
 	case "hm://connect-state/v1/player/command":
 		return p.handlePlayerCommand(ctx, req.Payload)

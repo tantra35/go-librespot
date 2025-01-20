@@ -15,7 +15,7 @@ import (
 
 type messageReceiver struct {
 	uriPrefixes []string
-	c           chan Message
+	c           chan *Message
 }
 
 type Message struct {
@@ -25,22 +25,18 @@ type Message struct {
 }
 
 type requestReceiver struct {
-	c chan Request
+	c chan *Request
 }
 
 type Request struct {
-	resp   chan bool
-	stopCh chan struct{}
+	resp chan bool
 
 	MessageIdent string
 	Payload      RequestPayload
 }
 
-func (req Request) Reply(success bool) {
-	select {
-	case req.resp <- success:
-	case <-req.stopCh:
-	}
+func (req *Request) Reply(success bool) {
+	req.resp <- success
 }
 
 type RequestPayload struct {
@@ -175,7 +171,7 @@ func (d *Dealer) handleMessage(rawMsg *RawMessage) {
 		}
 	}
 
-	msg := Message{
+	msg := &Message{
 		Uri:     rawMsg.Uri,
 		Headers: rawMsg.Headers,
 		Payload: payloadBytes,
@@ -186,7 +182,7 @@ func (d *Dealer) handleMessage(rawMsg *RawMessage) {
 	}
 }
 
-func (d *Dealer) ReceiveMessage(uriPrefixes ...string) <-chan Message {
+func (d *Dealer) ReceiveMessage(uriPrefixes ...string) <-chan *Message {
 	if len(uriPrefixes) == 0 {
 		panic("uri prefixes list cannot be empty")
 	}
@@ -195,7 +191,7 @@ func (d *Dealer) ReceiveMessage(uriPrefixes ...string) <-chan Message {
 	defer d.messageReceiversLock.Unlock()
 
 	// create new receiver
-	c := make(chan Message)
+	c := make(chan *Message)
 	d.messageReceivers = append(d.messageReceivers, messageReceiver{uriPrefixes, c})
 
 	// start receiving if necessary
@@ -231,9 +227,8 @@ func (d *Dealer) handleRequest(rawMsg *RawMessage) {
 
 	// dispatch request
 	resp := make(chan bool)
-	recv.c <- Request{
+	recv.c <- &Request{
 		resp:         resp,
-		stopCh:       d.stopCh,
 		MessageIdent: rawMsg.MessageIdent,
 		Payload:      payload,
 	}
@@ -247,7 +242,7 @@ func (d *Dealer) handleRequest(rawMsg *RawMessage) {
 	}
 }
 
-func (d *Dealer) ReceiveRequest(uri string) <-chan Request {
+func (d *Dealer) ReceiveRequest(uri string) <-chan *Request {
 	d.requestReceiversLock.Lock()
 	defer d.requestReceiversLock.Unlock()
 
@@ -258,7 +253,7 @@ func (d *Dealer) ReceiveRequest(uri string) <-chan Request {
 	}
 
 	// create new receiver
-	c := make(chan Request)
+	c := make(chan *Request)
 	d.requestReceivers[uri] = requestReceiver{c}
 
 	// start receiving if necessary
