@@ -557,9 +557,12 @@ func (p *AppPlayer) Close() {
 	p.sess.Close()
 }
 
-func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest) {
+func (p *AppPlayer) Run(_ctx context.Context, apiRecv <-chan ApiRequest) {
+	runCtx, cancelFn := context.WithCancel(_ctx)
+	defer cancelFn()
+
 	log.Infof("[ruslan] AppPlayer player loop begin")
-	err := p.sess.Dealer().Connect(ctx)
+	err := p.sess.Dealer().Connect(runCtx)
 	if err != nil {
 		p.app.log.WithError(err).Error("failed connecting to dealer")
 		p.Close()
@@ -597,7 +600,7 @@ loop:
 			}
 
 			log.Debug("[ruslan] AppPlayer player loop iteration received dealer message begin")
-			if err := p.handleDealerMessage(ctx, msg); err != nil {
+			if err := p.handleDealerMessage(runCtx, msg); err != nil {
 				p.app.log.WithError(err).Warn("failed handling dealer message")
 			}
 			log.Debug("[ruslan] AppPlayer player loop iteration received dealer message end")
@@ -609,7 +612,7 @@ loop:
 
 			log.Debug("[ruslan] AppPlayer player loop iteration received dealer request begin")
 			lreply := false
-			err := p.handleDealerRequest(ctx, req)
+			err := p.handleDealerRequest(runCtx, req)
 			if err != nil {
 				p.app.log.WithError(err).Warn("failed handling dealer request")
 			} else {
@@ -625,7 +628,7 @@ loop:
 				break
 			}
 
-			data, err := p.handleApiRequest(ctx, req)
+			data, err := p.handleApiRequest(runCtx, req)
 			req.Reply(data, err)
 
 		case ev, lok := <-playerRecv:
@@ -633,7 +636,7 @@ loop:
 				break
 			}
 
-			p.handlePlayerEvent(ctx, &ev)
+			p.handlePlayerEvent(runCtx, &ev)
 
 		case volume := <-p.volumeUpdate:
 			// Received a new volume: from Spotify Connect, from the REST API,
@@ -647,7 +650,7 @@ loop:
 
 		case <-volumeTimer.C:
 			// We've gone 1 second without update, send the new value now.
-			p.volumeUpdated(ctx)
+			p.volumeUpdated(runCtx)
 		}
 
 		log.Debug("[ruslan] AppPlayer player loop iteration end")

@@ -62,10 +62,8 @@ func (c *Spclient) innerRequest(ctx context.Context, method string, reqUrl *url.
 		Header: http.Header{},
 	}
 
-	if header != nil {
-		for name, values := range header {
-			req.Header[name] = values
-		}
+	for name, values := range header {
+		req.Header[name] = values
 	}
 
 	req.Header.Set("Client-Token", c.clientToken)
@@ -95,7 +93,7 @@ func (c *Spclient) innerRequest(ctx context.Context, method string, reqUrl *url.
 		}
 
 		return resp, nil
-	}, backoff.NewExponentialBackOff())
+	}, backoff.WithContext(backoff.NewExponentialBackOff(), ctx))
 	if err != nil {
 		return nil, fmt.Errorf("spclient request failed: %w", err)
 	}
