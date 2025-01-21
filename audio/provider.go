@@ -27,10 +27,10 @@ type KeyProvider struct {
 
 	recvLoopOnce sync.Once
 
-	reqChan chan keyRequest
+	reqChan chan *keyRequest
 	stopCh  chan struct{}
 
-	reqs     map[uint32]keyRequest
+	reqs     map[uint32]*keyRequest
 	seq      uint32
 	reqsLock sync.RWMutex
 }
@@ -49,9 +49,9 @@ type keyResponse struct {
 }
 
 func NewAudioKeyProvider(log librespot.Logger, ap *ap.Accesspoint) *KeyProvider {
-	p := &KeyProvider{log: log, ap: ap, reqs: make(map[uint32]keyRequest)}
-	p.reqChan = make(chan keyRequest)
-	p.stopCh = make(chan struct{}, 1)
+	p := &KeyProvider{log: log, ap: ap, reqs: make(map[uint32]*keyRequest)}
+	p.reqChan = make(chan *keyRequest)
+	p.stopCh = make(chan struct{})
 	return p
 }
 
@@ -126,11 +126,15 @@ func (p *KeyProvider) Request(ctx context.Context, gid []byte, fileId []byte) ([
 	p.reqsLock.Lock()
 	reqSeq := p.seq
 	p.seq++
-	req := keyRequest{gid: gid, fileId: fileId, seq: reqSeq, ctx: ctx, resp: make(chan keyResponse, 1)}
+	req := &keyRequest{gid: gid, fileId: fileId, seq: reqSeq, ctx: ctx, resp: make(chan keyResponse, 1)}
 	p.reqs[reqSeq] = req
 	p.reqsLock.Unlock()
 
-	p.reqChan <- req
+	select {
+	case p.reqChan <- req:
+	case <-p.stopCh:
+		return nil, context.Canceled
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
