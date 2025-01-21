@@ -186,7 +186,7 @@ func (d *Dealer) isStoped() bool {
 	return d.stop
 }
 
-func (d *Dealer) recvLoop(ctx context.Context) {
+func (d *Dealer) recvLoop(_ctx context.Context) {
 	d.log.Debug("[ruslan] dealer recv loop begin")
 
 	for !d.isStoped() {
@@ -194,7 +194,7 @@ func (d *Dealer) recvLoop(ctx context.Context) {
 
 		for !d.isStoped() {
 			// no need to hold the connMu since reconnection happens in this routine
-			msgType, messageBytes, err := d.conn.Read(ctx)
+			msgType, messageBytes, err := d.conn.Read(_ctx)
 			if err != nil {
 				d.log.WithError(err).Errorf("failed receiving dealer message")
 				break
@@ -233,8 +233,13 @@ func (d *Dealer) recvLoop(ctx context.Context) {
 		// if we shouldn't stop, try to reconnect
 		if !d.isStoped() {
 			err := backoff.Retry(func() error {
-				return d.connect(ctx)
-			}, backoff.NewExponentialBackOff())
+				return d.connect(_ctx)
+			}, backoff.WithContext(backoff.NewExponentialBackOff(), _ctx))
+
+			if _ctx.Err() != nil {
+				break
+			}
+
 			if err != nil {
 				d.log.WithError(err).Errorf("failed reconnecting dealer, bye bye")
 				log.Exit(1)

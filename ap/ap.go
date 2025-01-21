@@ -52,7 +52,7 @@ type Accesspoint struct {
 	stop            bool
 	recvLoopStopCh  chan struct{}
 	recvLoopOnce    sync.Once
-	recvChans       map[PacketType][]chan Packet
+	recvChans       map[PacketType][]chan *Packet
 	recvChansLock   sync.RWMutex
 	lastPongAck     time.Time
 	lastPongAckLock sync.Mutex
@@ -65,7 +65,7 @@ type Accesspoint struct {
 }
 
 func NewAccesspoint(log librespot.Logger, addr librespot.GetAddressFunc, deviceId string) *Accesspoint {
-	return &Accesspoint{log: log, addr: addr, deviceId: deviceId, recvChans: make(map[PacketType][]chan Packet)}
+	return &Accesspoint{log: log, addr: addr, deviceId: deviceId, recvChans: make(map[PacketType][]chan *Packet)}
 }
 
 func (ap *Accesspoint) init(ctx context.Context) (err error) {
@@ -240,8 +240,8 @@ func (ap *Accesspoint) Send(ctx context.Context, pktType PacketType, payload []b
 	return ap.encConn.sendPacket(ctx, pktType, payload)
 }
 
-func (ap *Accesspoint) Receive(types ...PacketType) <-chan Packet {
-	ch := make(chan Packet)
+func (ap *Accesspoint) Receive(types ...PacketType) <-chan *Packet {
+	ch := make(chan *Packet)
 	ap.recvChansLock.Lock()
 	for _, type_ := range types {
 		ll := ap.recvChans[type_]
@@ -316,7 +316,7 @@ func (ap *Accesspoint) recvLoop(_ctx context.Context) {
 
 				handled := false
 				for _, ch := range ll {
-					ch <- Packet{Type: pkt, Payload: payload}
+					ch <- &Packet{Type: pkt, Payload: payload}
 					handled = true
 				}
 
@@ -333,7 +333,12 @@ func (ap *Accesspoint) recvLoop(_ctx context.Context) {
 		if !ap.isStoped() {
 			err := backoff.Retry(func() error {
 				return ap.reconnect(_ctx)
-			}, backoff.NewExponentialBackOff())
+			}, backoff.WithContext(backoff.NewExponentialBackOff(), _ctx))
+
+			if _ctx.Err() != nil {
+				break
+			}
+
 			if err != nil {
 				ap.log.WithError(err).Errorf("failed reconnecting accesspoint")
 				log.Exit(1)
@@ -346,7 +351,7 @@ func (ap *Accesspoint) recvLoop(_ctx context.Context) {
 	ap.recvChansLock.RLock()
 	defer ap.recvChansLock.RUnlock()
 
-	var closedChannels []chan Packet
+	var closedChannels []chan *Packet
 	for _, ll := range ap.recvChans {
 		for _, ch := range ll {
 			// call close on each channel only once
