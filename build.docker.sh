@@ -1,7 +1,7 @@
 #!/bin/bash
 
 REPOSITORY=tantra35/go-librespot
-VERSION=0.0.4
+VERSION=0.0.5
 
 sudo docker build \
   --build-arg TARGET=aarch64-linux-gnu \
