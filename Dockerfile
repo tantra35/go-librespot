@@ -1,4 +1,4 @@
-FROM docker.io/golang:1.22.10-bullseye as build-go-librespot
+FROM docker.io/golang:1.22.11-bullseye as build-go-librespot
 
 # Preparations
 RUN apt-get update && apt-get install -y wget build-essential

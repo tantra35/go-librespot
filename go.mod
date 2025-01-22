@@ -20,10 +20,10 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/pflag v1.0.5
 	github.com/xlab/vorbis-go v0.0.0-20210911202351-b5b85f1ec645
-	golang.org/x/crypto v0.24.0
+	golang.org/x/crypto v0.32.0
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
-	golang.org/x/net v0.26.0
-	golang.org/x/oauth2 v0.21.0
+	golang.org/x/net v0.34.0
+	golang.org/x/oauth2 v0.25.0
 	google.golang.org/protobuf v1.30.0
 )
 
@@ -39,7 +39,7 @@ require (
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	golang.org/x/mod v0.18.0 // indirect
 	golang.org/x/sync v0.7.0 // indirect
-	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/tools v0.22.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
