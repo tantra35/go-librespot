@@ -64,7 +64,7 @@ func newPulseAudioOutput(opts *NewOutputOptions) (*pulseAudioOutput, error) {
 		lsink, err := client.SinkByID(opts.Device)
 		if err != nil {
 			client.Close()
-			return nil, fmt.Errorf("Can't find sink %s: %w", opts.Device, err)
+			return nil, fmt.Errorf("cannot find pulseaudio sink %s: %w", opts.Device, err)
 		}
 
 		lplaybackopts = append(lplaybackopts, pulse.PlaybackSink(lsink))
