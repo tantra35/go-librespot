@@ -656,6 +656,5 @@ loop:
 		log.Debug("[ruslan] AppPlayer player loop iteration end")
 	}
 
-	p.sess.Dealer().Close()
 	log.Debug("[ruslan] AppPlayer player loop end")
 }

@@ -59,7 +59,6 @@ func NewDealer(log librespot.Logger, client *http.Client, dealerAddr librespot.G
 		addr:             dealerAddr,
 		accessToken:      accessToken,
 		requestReceivers: map[string]requestReceiver{},
-		stopCh:           make(chan struct{}),
 	}
 }
 
@@ -73,6 +72,8 @@ func (d *Dealer) Connect(ctx context.Context) error {
 	}
 
 	d.stop = false
+	d.stopCh = make(chan struct{})
+
 	return d.connect(ctx)
 }
 
@@ -160,7 +161,7 @@ loop:
 			err := d.conn.Write(ctx, websocket.MessageText, []byte("{\"type\":\"ping\"}"))
 			cancel()
 			if err != nil {
-				if d.stop {
+				if d.isStoped() {
 					// break early without logging if we should stop
 					break loop
 				}
