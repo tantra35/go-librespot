@@ -2,7 +2,7 @@ module github.com/devgianlu/go-librespot
 
 go 1.22.2
 
-replace github.com/jfreymuth/pulse => github.com/tantra35/pulse v0.0.0-20250119180117-8660f24ebdfc
+replace github.com/jfreymuth/pulse => github.com/tantra35/pulse v0.0.0-20250130210114-9bc0b7b5d539
 
 require (
 	github.com/cenkalti/backoff/v4 v4.2.1
