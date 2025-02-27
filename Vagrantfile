@@ -7,8 +7,8 @@ Vagrant.configure("2") do |config|
 		vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
 	end
 
-	config.vm.define "go-librespot-build" do |node|
-		node.vm.hostname = "go-librespot-build"
+	config.vm.define "tantra35-go-librespot-build" do |node|
+		node.vm.hostname = "tantra35-go-librespot-build"
 		node.vm.synced_folder ".provision/", "/tmp/.provision"
 		node.vm.synced_folder "./", "/home/vagrant/builddocker"
 
