@@ -255,18 +255,6 @@ func (d *Dealer) recvLoop(_ctx context.Context) {
 		}
 	}
 
-	d.requestReceiversLock.RLock()
-	for _, recv := range d.requestReceivers {
-		close(recv.c)
-	}
-	d.requestReceiversLock.RUnlock()
-
-	d.messageReceiversLock.RLock()
-	for _, recv := range d.messageReceivers {
-		close(recv.c)
-	}
-	d.messageReceiversLock.RUnlock()
-
 	d.log.Debug("[ruslan] dealer recv loop end")
 }
 

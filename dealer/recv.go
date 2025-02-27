@@ -178,7 +178,11 @@ func (d *Dealer) handleMessage(rawMsg *RawMessage) {
 	}
 
 	for _, recv := range matchedReceivers {
-		recv.c <- msg
+		select {
+		case recv.c <- msg:
+		case <-d.stopCh:
+			return
+		}
 	}
 }
 
