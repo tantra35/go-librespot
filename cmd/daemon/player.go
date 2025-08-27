@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,7 +75,7 @@ func (p *AppPlayer) handleAccesspointPacket(pktType ap.PacketType, payload []byt
 func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg *dealer.Message) error {
 	if strings.HasPrefix(msg.Uri, "hm://pusher/v1/connections/") {
 		p.spotConnId = msg.Headers["Spotify-Connection-Id"]
-		p.app.log.Debugf("received connection id: %s", p.spotConnId)
+		p.app.log.Debugf("received connection id: %s...%s", p.spotConnId[:16], p.spotConnId[len(p.spotConnId)-16:])
 
 		// put the initial state
 		if err := p.putConnectState(ctx, connectpb.PutStateReason_NEW_DEVICE); err != nil {
@@ -94,7 +97,8 @@ func (p *AppPlayer) handleDealerMessage(ctx context.Context, msg *dealer.Message
 		p.updateVolume(uint32(setVolCmd.Volume))
 	} else if strings.HasPrefix(msg.Uri, "hm://connect-state/v1/connect/logout") {
 		// this should happen only with zeroconf enabled
-		p.app.log.Debugf("requested logout out from %s", p.sess.Username())
+		p.app.log.WithField("username", librespot.ObfuscateUsername(p.sess.Username())).
+			Debugf("requested logout out")
 		p.logoutCh <- p
 	} else if strings.HasPrefix(msg.Uri, "hm://connect-state/v1/cluster") {
 		var clusterUpdate connectpb.ClusterUpdate
@@ -165,6 +169,14 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 			return fmt.Errorf("failed creating track list: %w", err)
 		}
 
+		if sessId := transferState.CurrentSession.OriginalSessionId; sessId != nil {
+			p.state.player.SessionId = *sessId
+		} else {
+			sessionId := make([]byte, 16)
+			_, _ = rand.Read(sessionId)
+			p.state.player.SessionId = base64.StdEncoding.EncodeToString(sessionId)
+		}
+
 		p.state.setActive(true)
 		p.state.player.IsPlaying = false
 		p.state.player.IsBuffering = false
@@ -182,6 +194,7 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 
 		// current session
 		p.state.player.PlayOrigin = transferState.CurrentSession.PlayOrigin
+		p.state.player.PlayOrigin.DeviceIdentifier = req.SentByDeviceId
 		p.state.player.ContextUri = transferState.CurrentSession.Context.Uri
 		p.state.player.ContextUrl = transferState.CurrentSession.Context.Url
 		p.state.player.ContextRestrictions = transferState.CurrentSession.Context.Restrictions
@@ -251,7 +264,10 @@ func (p *AppPlayer) handlePlayerCommand(ctx context.Context, req dealer.RequestP
 
 		return nil
 	case "play":
+		p.state.setActive(true)
+
 		p.state.player.PlayOrigin = req.Command.PlayOrigin
+		p.state.player.PlayOrigin.DeviceIdentifier = req.SentByDeviceId
 		p.state.player.Suppressions = req.Command.Options.Suppressions
 
 		// apply overrides
@@ -643,13 +659,12 @@ loop:
 			// or from the system volume mixer.
 			// Because these updates can be quite frequent, we have to rate
 			// limit them (otherwise we get HTTP error 429: Too many requests
-			// for user). Sending the new value after 1 second of no updates
-			// matches the Spotify Web Player.
-			p.state.device.Volume = uint32(volume * player.MaxStateVolume)
-			volumeTimer.Reset(time.Second)
+			// for user).
+			p.state.device.Volume = uint32(math.Round(float64(volume * player.MaxStateVolume)))
+			volumeTimer.Reset(100 * time.Millisecond)
 
 		case <-volumeTimer.C:
-			// We've gone 1 second without update, send the new value now.
+			// We've gone some time without update, send the new value now.
 			p.volumeUpdated(runCtx)
 		}
 

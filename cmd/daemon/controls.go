@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -75,24 +78,59 @@ func (p *AppPlayer) schedulePrefetchNext() {
 
 func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 	switch ev.Type {
-	case player.EventTypePlaying:
+	case player.EventTypePlay:
 		p.state.player.IsPlaying = true
 		p.state.setPaused(false)
 		p.state.player.IsBuffering = false
 		p.updateState(ctx)
 
+		p.sess.Events().OnPlayerPlay(
+			p.primaryStream,
+			p.state.player.ContextUri,
+			p.state.player.Options.ShufflingContext,
+			p.state.player.PlayOrigin,
+			p.state.tracks.CurrentTrack(),
+			p.state.trackPosition(),
+		)
+
 		p.app.server.Emit(&ApiEvent{
 			Type: ApiEventTypePlaying,
 			Data: ApiEventDataPlaying{
 				Uri:        p.state.player.Track.Uri,
+				Resume:     false,
 				PlayOrigin: p.state.playOrigin(),
 			},
 		})
-	case player.EventTypePaused:
+	case player.EventTypeResume:
+		p.state.player.IsPlaying = true
+		p.state.setPaused(false)
+		p.state.player.IsBuffering = false
+		p.updateState(ctx)
+
+		p.sess.Events().OnPlayerResume(p.primaryStream, p.state.trackPosition())
+
+		p.app.server.Emit(&ApiEvent{
+			Type: ApiEventTypePlaying,
+			Data: ApiEventDataPlaying{
+				Uri:        p.state.player.Track.Uri,
+				Resume:     true,
+				PlayOrigin: p.state.playOrigin(),
+			},
+		})
+	case player.EventTypePause:
 		p.state.player.IsPlaying = true
 		p.state.setPaused(true)
 		p.state.player.IsBuffering = false
 		p.updateState(ctx)
+
+		p.sess.Events().OnPlayerPause(
+			p.primaryStream,
+			p.state.player.ContextUri,
+			p.state.player.Options.ShufflingContext,
+			p.state.player.PlayOrigin,
+			p.state.tracks.CurrentTrack(),
+			p.state.trackPosition(),
+		)
 
 		p.app.server.Emit(&ApiEvent{
 			Type: ApiEventTypePaused,
@@ -102,6 +140,8 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 			},
 		})
 	case player.EventTypeNotPlaying:
+		p.sess.Events().OnPlayerEnd(p.primaryStream, p.state.trackPosition())
+
 		p.app.server.Emit(&ApiEvent{
 			Type: ApiEventTypeNotPlaying,
 			Data: ApiEventDataNotPlaying{
@@ -124,7 +164,7 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 				},
 			})
 		}
-	case player.EventTypeStopped:
+	case player.EventTypeStop:
 		p.app.server.Emit(&ApiEvent{
 			Type: ApiEventTypeStopped,
 			Data: ApiEventDataStopped{
@@ -145,6 +185,10 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 	}
 
 	p.state.setPaused(paused)
+
+	sessionId := make([]byte, 16)
+	_, _ = rand.Read(sessionId)
+	p.state.player.SessionId = base64.StdEncoding.EncodeToString(sessionId)
 
 	p.state.player.ContextUri = spotCtx.Uri
 	p.state.player.ContextUrl = spotCtx.Url
@@ -198,7 +242,11 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 }
 
 func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) error {
-	p.primaryStream = nil
+	if p.primaryStream != nil {
+		p.sess.Events().OnPrimaryStreamUnload(p.primaryStream, p.player.PositionMs())
+
+		p.primaryStream = nil
+	}
 
 	spotId, err := librespot.SpotifyIdFromUri(p.state.player.Track.Uri)
 	if err != nil {
@@ -248,12 +296,15 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 		return fmt.Errorf("failed setting stream for %s: %w", spotId, err)
 	}
 
+	p.sess.Events().PostPrimaryStreamLoad(p.primaryStream, paused)
+
 	p.app.log.WithField("uri", spotId.Uri()).
 		Infof("loaded %s %s (paused: %t, position: %dms, duration: %dms, prefetched: %t)", spotId.Type(),
 			strconv.QuoteToGraphic(p.primaryStream.Media.Name()), paused, trackPosition, p.primaryStream.Media.Duration(),
 			prefetched)
 
 	p.state.updateTimestamp()
+	p.state.player.PlaybackId = hex.EncodeToString(p.primaryStream.PlaybackId)
 	p.state.player.Duration = int64(p.primaryStream.Media.Duration())
 	p.state.player.IsPlaying = true
 	p.state.player.IsBuffering = false
@@ -409,6 +460,7 @@ func (p *AppPlayer) seek(ctx context.Context, position int64) error {
 		return fmt.Errorf("no primary stream")
 	}
 
+	oldPosition := p.player.PositionMs()
 	position = max(0, min(position, int64(p.primaryStream.Media.Duration())))
 
 	p.app.log.Debugf("seek track to %dms", position)
@@ -420,6 +472,8 @@ func (p *AppPlayer) seek(ctx context.Context, position int64) error {
 	p.state.player.PositionAsOfTimestamp = position
 	p.updateState(ctx)
 	p.schedulePrefetchNext()
+
+	p.sess.Events().OnPlayerSeek(p.primaryStream, oldPosition, position)
 
 	p.app.server.Emit(&ApiEvent{
 		Type: ApiEventTypeSeek,
@@ -438,6 +492,8 @@ func (p *AppPlayer) skipPrev(ctx context.Context, allowSeeking bool) error {
 	if allowSeeking && p.player.PositionMs() > 3000 {
 		return p.seek(ctx, 0)
 	}
+
+	p.sess.Events().OnPlayerSkipBackward(p.primaryStream, p.player.PositionMs())
 
 	if p.state.tracks != nil {
 		p.app.log.Debug("skip previous track")
@@ -461,6 +517,8 @@ func (p *AppPlayer) skipPrev(ctx context.Context, allowSeeking bool) error {
 }
 
 func (p *AppPlayer) skipNext(ctx context.Context, track *connectpb.ContextTrack) error {
+	p.sess.Events().OnPlayerSkipForward(p.primaryStream, p.player.PositionMs(), track != nil)
+
 	if track != nil {
 		contextSpotType := librespot.InferSpotifyIdTypeFromContextUri(p.state.player.ContextUri)
 		if err := p.state.tracks.TrySeek(ctx, tracks.ContextTrackComparator(contextSpotType, track)); err != nil {
@@ -587,7 +645,7 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 // Return the volume as an integer in the range 0..player.MaxStateVolume, as
 // used in the API.
 func (p *AppPlayer) apiVolume() uint32 {
-	return uint32(math.Ceil(float64(p.state.device.Volume*p.app.cfg.VolumeSteps) / player.MaxStateVolume))
+	return uint32(math.Round(float64(p.state.device.Volume*p.app.cfg.VolumeSteps) / player.MaxStateVolume))
 }
 
 // Set the player volume to the new volume, also notifies about the change.
@@ -598,8 +656,14 @@ func (p *AppPlayer) updateVolume(newVal uint32) {
 		newVal = 0
 	}
 
-	p.app.log.Debugf("update volume to %d/%d", newVal, player.MaxStateVolume)
+	p.app.log.Debugf("update volume requested to %d/%d", newVal, player.MaxStateVolume)
 	p.player.SetVolume(newVal)
+
+	// If there is a value in the channel buffer, remove it.
+	select {
+	case <-p.volumeUpdate:
+	default:
+	}
 
 	p.volumeUpdate <- float32(newVal) / player.MaxStateVolume
 }

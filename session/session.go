@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"github.com/devgianlu/go-librespot/events"
+	"github.com/devgianlu/go-librespot/mercury"
+	"github.com/devgianlu/go-librespot/player"
 	"net/http"
+	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/ap"
@@ -30,9 +34,11 @@ type Session struct {
 	login5   *login5.Login5
 
 	ap       *ap.Accesspoint
+	hg       *mercury.Client
 	sp       *spclient.Spclient
 	dealer   *dealer.Dealer
 	audioKey *audio.KeyProvider
+	events   player.EventManager
 }
 
 func NewSessionFromOptions(ctx context.Context, opts *Options) (*Session, error) {
@@ -55,13 +61,13 @@ func NewSessionFromOptions(ctx context.Context, opts *Options) (*Session, error)
 	}
 
 	if s.client == nil {
-		s.client = &http.Client{}
+		s.client = &http.Client{Timeout: 30 * time.Second}
 	}
 
 	// use provided client token or retrieve a new one
 	if len(opts.ClientToken) == 0 {
 		var err error
-		s.clientToken, err = retrieveClientToken(s.deviceId)
+		s.clientToken, err = retrieveClientToken(s.client, s.deviceId)
 		if err != nil {
 			return nil, fmt.Errorf("failed obtaining client token: %w", err)
 		}
@@ -190,14 +196,25 @@ func NewSessionFromOptions(ctx context.Context, opts *Options) (*Session, error)
 	}
 	s.dealer = dealer.NewDealer(opts.Log, s.client, dealerAddr, s.login5.AccessToken())
 
+	// initialize mercury/hermes
+	s.hg = mercury.NewClient(opts.Log, s.ap)
+
 	// init audio key provider
 	s.audioKey = audio.NewAudioKeyProvider(opts.Log, s.ap)
+
+	// init event sender
+	s.events, err = events.Plugin.NewEventManager(opts.Log, opts.AppState, s.hg, s.sp, s.ap.Username())
+	if err != nil {
+		return nil, fmt.Errorf("failed initializing event sender: %w", err)
+	}
 
 	return &s, nil
 }
 
 func (s *Session) Close() {
+	s.events.Close()
 	s.audioKey.Close()
+	s.hg.Close()
 	s.dealer.Close()
 	s.ap.Close()
 }

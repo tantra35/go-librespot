@@ -401,6 +401,9 @@ func (out *alsaOutput) DelayMs() (int64, error) {
 func (out *alsaOutput) SetVolume(vol float32) {
 	if vol < 0 || vol > 1 {
 		panic(fmt.Sprintf("invalid volume value: %0.2f", vol))
+	} else if vol == out.volume {
+		// No need to update the volume if it didn't change.
+		return
 	}
 
 	out.volume = vol
@@ -411,7 +414,7 @@ func (out *alsaOutput) SetVolume(vol float32) {
 		C.snd_mixer_elem_set_callback_private(out.mixerElemHandle, unsafe.Pointer(&placeholder))
 
 		mixerVolume := vol*(float32(out.mixerMaxVolume-out.mixerMinVolume)) + float32(out.mixerMinVolume)
-		out.log.Debugf("updating alsa mixer volume to %.02f\n", mixerVolume)
+		out.log.Debugf("updating alsa mixer volume to %d/%d\n", C.long(mixerVolume), out.mixerMaxVolume)
 		if err := C.snd_mixer_selem_set_playback_volume_all(out.mixerElemHandle, C.long(mixerVolume)); err != 0 {
 			out.log.WithError(out.alsaError("snd_mixer_selem_set_playback_volume_all", err)).Warnf("failed setting output device mixer volume")
 		}

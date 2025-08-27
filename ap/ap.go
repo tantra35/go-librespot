@@ -422,7 +422,7 @@ func (ap *Accesspoint) performKeyExchange() ([]byte, error) {
 			Product:      pb.Product_PRODUCT_CLIENT.Enum(),
 			ProductFlags: productFlags,
 			Platform:     librespot.GetPlatform().Enum(),
-			Version:      proto.Uint64(117300517),
+			Version:      proto.Uint64(librespot.SpotifyVersionCode),
 		},
 		CryptosuitesSupported: []pb.Cryptosuite{pb.Cryptosuite_CRYPTO_SUITE_SHANNON},
 		ClientNonce:           ap.nonce,
@@ -533,7 +533,8 @@ func (ap *Accesspoint) authenticate(ctx context.Context, credentials *pb.LoginCr
 		}
 
 		ap.welcome = &welcome
-		ap.log.Infof("authenticated AP as %s", *welcome.CanonicalUsername)
+		ap.log.WithField("username", librespot.ObfuscateUsername(*welcome.CanonicalUsername)).
+			Infof("authenticated AP")
 
 		return nil
 	} else if recvPkt == PacketTypeAuthFailure {

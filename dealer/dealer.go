@@ -239,12 +239,13 @@ func (d *Dealer) recvLoop(_ctx context.Context) {
 
 			if _ctx.Err() != nil {
 				break
-			}
+		} else {
 
 			if err != nil {
 				d.log.WithError(err).Errorf("failed reconnecting dealer, bye bye")
 				log.Exit(1)
 			}
+	}
 
 			d.lastPongLock.Lock()
 			d.lastPong = time.Now()

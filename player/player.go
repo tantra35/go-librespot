@@ -4,32 +4,45 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/audio"
 	"github.com/devgianlu/go-librespot/output"
 	downloadpb "github.com/devgianlu/go-librespot/proto/spotify/download"
-	"github.com/devgianlu/go-librespot/proto/spotify/metadata"
+	extmetadatapb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
+	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
 	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/vorbis"
+	"golang.org/x/exp/rand"
 	log "github.com/sirupsen/logrus"
 )
 
-const SampleRate = 44100
-const Channels = 2
+const (
+	SampleRate = 44100
+	Channels   = 2
+)
 
 const MaxStateVolume = 65535
+
+const DisableCheckMediaRestricted = true
+
+const CdnUrlQuarantineDuration = 15 * time.Minute
 
 type Player struct {
 	log librespot.Logger
 
 	normalisationEnabled bool
+	normalisationUseAlbumGain bool
 	normalisationPregain float32
 	countryCode          *string
 
 	sp       *spclient.Spclient
 	audioKey *audio.KeyProvider
+	events   EventManager
+
+	cdnQuarantine map[string]time.Time
 
 	newOutput func(source librespot.Float32Reader, volume float32) (output.Output, error)
 
@@ -70,12 +83,16 @@ type playerCmdDataSet struct {
 type Options struct {
 	Spclient *spclient.Spclient
 	AudioKey *audio.KeyProvider
+	Events   EventManager
 
 	Log librespot.Logger
 
 	// NormalisationEnabled specifies if the volume should be normalised according
 	// to Spotify parameters. Only track normalization is supported.
 	NormalisationEnabled bool
+	// NormalisationUseAlbumGain specifies whether album gain instead of track gain
+	// should be used for normalisation
+	NormalisationUseAlbumGain bool
 	// NormalisationPregain specifies the pre-gain to apply when normalising the volume
 	// in dB. Use negative values to avoid clipping.
 	NormalisationPregain float32
@@ -134,7 +151,10 @@ func NewPlayer(opts *Options) (*Player, error) {
 		log:                  opts.Log,
 		sp:                   opts.Spclient,
 		audioKey:             opts.AudioKey,
+		events:                    opts.Events,
+		cdnQuarantine:             make(map[string]time.Time),
 		normalisationEnabled: opts.NormalisationEnabled,
+		normalisationUseAlbumGain: opts.NormalisationUseAlbumGain,
 		normalisationPregain: opts.NormalisationPregain,
 		countryCode:          opts.CountryCode,
 		newOutput: func(reader librespot.Float32Reader, volume float32) (output.Output, error) {
@@ -245,9 +265,9 @@ loop:
 				log.Debugf("[ruslan] player manageLoop iteration playerCmdSet controlpoint 04")
 
 				if data.paused {
-					p.ev <- Event{Type: EventTypePaused}
+					p.ev <- Event{Type: EventTypePause}
 				} else {
-					p.ev <- Event{Type: EventTypePlaying}
+					p.ev <- Event{Type: EventTypePlay}
 				}
 
 				log.Debugf("[ruslan] player manageLoop iteration playerCmdSet controlpoint 05")
@@ -257,7 +277,7 @@ loop:
 						cmd.resp <- err
 					} else {
 						cmd.resp <- nil
-						p.ev <- Event{Type: EventTypePlaying}
+						p.ev <- Event{Type: EventTypeResume}
 					}
 				} else {
 					cmd.resp <- nil
@@ -268,7 +288,7 @@ loop:
 						cmd.resp <- err
 					} else {
 						cmd.resp <- nil
-						p.ev <- Event{Type: EventTypePaused}
+						p.ev <- Event{Type: EventTypePause}
 					}
 				} else {
 					cmd.resp <- nil
@@ -281,7 +301,7 @@ loop:
 				}
 
 				cmd.resp <- struct{}{}
-				p.ev <- Event{Type: EventTypeStopped}
+				p.ev <- Event{Type: EventTypeStop}
 			case playerCmdSeek:
 				if out != nil {
 					if err := source.SetPositionMs(cmd.data.(int64)); err != nil {
@@ -330,7 +350,7 @@ loop:
 			p.log.Tracef("cleared closed output device")
 
 			// FIXME: this is called even if not needed, like when autoplay starts
-			p.ev <- Event{Type: EventTypeStopped}
+			p.ev <- Event{Type: EventTypeStop}
 
 		case <-source.Done():
 			p.ev <- Event{Type: EventTypeNotPlaying}
@@ -430,22 +450,74 @@ func (p *Player) SetSecondaryStream(source librespot.AudioSource) {
 	<-resp
 }
 
-const DisableCheckMediaRestricted = true
+func (p *Player) httpChunkedReaderFromStorageResolve(log librespot.Logger, client *http.Client, storageResolve *downloadpb.StorageResolveResponse) (*audio.HttpChunkedReader, error) {
+	if storageResolve.Result == downloadpb.StorageResolveResponse_STORAGE {
+		return nil, fmt.Errorf("old storage not supported")
+	} else if storageResolve.Result == downloadpb.StorageResolveResponse_RESTRICTED {
+		return nil, fmt.Errorf("storage is restricted")
+	} else if storageResolve.Result == downloadpb.StorageResolveResponse_CDN {
+		if len(storageResolve.Cdnurl) == 0 {
+			return nil, fmt.Errorf("no cdn urls")
+		}
+
+		log.Tracef("found %d cdn urls", len(storageResolve.Cdnurl))
+
+		var err error
+		for i := 0; i < len(storageResolve.Cdnurl); i++ {
+			var cdnUrl *url.URL
+			cdnUrl, err = url.Parse(storageResolve.Cdnurl[i])
+			if err != nil {
+				log.WithError(err).WithField("url", storageResolve.Cdnurl[i]).Warnf("failed parsing cdn url, trying next url")
+				continue
+			}
+
+			if lastFailed, found := p.cdnQuarantine[cdnUrl.Host]; found {
+				if i == len(storageResolve.Cdnurl)-1 {
+					log.WithField("host", cdnUrl.Host).Warnf("cannot skip cdn url because it is the last one")
+				} else if time.Since(lastFailed) < CdnUrlQuarantineDuration {
+					log.WithField("host", cdnUrl.Host).Infof("skipping cdn url because it has failed recently")
+					continue
+				}
+			}
+
+			var rawStream *audio.HttpChunkedReader
+			rawStream, err = audio.NewHttpChunkedReader(log, client, cdnUrl.String())
+			if err != nil {
+				log.WithError(err).WithField("host", cdnUrl.Host).Warnf("failed creating chunked reader, trying next url")
+				p.cdnQuarantine[cdnUrl.Host] = time.Now()
+				continue
+			}
+
+			delete(p.cdnQuarantine, cdnUrl.Host)
+			return rawStream, nil
+		}
+
+		return nil, fmt.Errorf("failed creating chunked reader for any cdn url: %w", err)
+	} else {
+		return nil, fmt.Errorf("unknown storage resolve result: %s", storageResolve.Result)
+	}
+}
 
 func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId librespot.SpotifyId, bitrate int, mediaPosition int64) (*Stream, error) {
 	log := p.log.WithField("uri", spotId.Uri())
 
+	playbackId := make([]byte, 16)
+	_, _ = rand.Read(playbackId)
+
+	p.events.PreStreamLoadNew(playbackId, spotId, mediaPosition)
+
 	var media *librespot.Media
-	var file *metadata.AudioFile
+	var file *metadatapb.AudioFile
 
 	switch spotId.Type() {
 	case librespot.SpotifyIdTypeTrack:
-		trackMeta, err := p.sp.MetadataForTrack(ctx, spotId)
+		var trackMeta metadatapb.Track
+		err := p.sp.ExtendedMetadataSimple(ctx, spotId, extmetadatapb.ExtensionKind_TRACK_V4, &trackMeta)
 		if err != nil {
 			return nil, fmt.Errorf("failed getting track metadata: %w", err)
 		}
 
-		media = librespot.NewMediaFromTrack(trackMeta)
+		media = librespot.NewMediaFromTrack(&trackMeta)
 		if !DisableCheckMediaRestricted && isMediaRestricted(media, *p.countryCode) {
 			return nil, librespot.ErrMediaRestricted
 		}
@@ -468,12 +540,13 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		}
 
 	case librespot.SpotifyIdTypeEpisode:
-		episodeMeta, err := p.sp.MetadataForEpisode(ctx, spotId)
+		var episodeMeta metadatapb.Episode
+		err := p.sp.ExtendedMetadataSimple(ctx, spotId, extmetadatapb.ExtensionKind_EPISODE_V4, &episodeMeta)
 		if err != nil {
 			return nil, fmt.Errorf("failed getting episode metadata: %w", err)
 		}
 
-		media = librespot.NewMediaFromEpisode(episodeMeta)
+		media = librespot.NewMediaFromEpisode(&episodeMeta)
 		if !DisableCheckMediaRestricted && isMediaRestricted(media, *p.countryCode) {
 			return nil, librespot.ErrMediaRestricted
 		}
@@ -487,6 +560,8 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		return nil, fmt.Errorf("unsupported spotify type: %s", spotId.Type())
 	}
 
+	p.events.PostStreamResolveAudioFile(playbackId, int32(bitrate), media, file)
+
 	log.Debugf("selected format %s (%x)", file.Format.String(), file.FileId)
 
 	audioKey, err := p.audioKey.Request(ctx, spotId.Id(), file.FileId)
@@ -494,31 +569,21 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		return nil, fmt.Errorf("failed retrieving audio key: %w", err)
 	}
 
+	p.events.PostStreamRequestAudioKey(playbackId)
+
 	storageResolve, err := p.sp.ResolveStorageInteractive(ctx, file.FileId, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed resolving track storage: %w", err)
 	}
 
-	var trackUrl string
-	switch storageResolve.Result {
-	case downloadpb.StorageResolveResponse_CDN:
-		if len(storageResolve.Cdnurl) == 0 {
-			return nil, fmt.Errorf("no cdn urls")
-		}
+	p.events.PostStreamResolveStorage(playbackId)
 
-		trackUrl = storageResolve.Cdnurl[0]
-	case downloadpb.StorageResolveResponse_STORAGE:
-		return nil, fmt.Errorf("old storage not supported")
-	case downloadpb.StorageResolveResponse_RESTRICTED:
-		return nil, fmt.Errorf("storage is restricted")
-	default:
-		return nil, fmt.Errorf("unknown storage resolve result: %s", storageResolve.Result)
-	}
-
-	rawStream, err := audio.NewHttpChunkedReader(log.WithField("uri", spotId.String()), client, trackUrl)
+	rawStream, err := p.httpChunkedReaderFromStorageResolve(log, client, storageResolve)
 	if err != nil {
-		return nil, fmt.Errorf("failed initializing chunked reader: %w", err)
+		return nil, fmt.Errorf("failed creating chunked reader: %w", err)
 	}
+
+	p.events.PostStreamInitHttpChunkReader(playbackId, rawStream)
 
 	decryptedStream, err := audio.NewAesAudioDecryptor(rawStream, audioKey)
 	if err != nil {
@@ -532,7 +597,11 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 
 	var normalisationFactor float32
 	if p.normalisationEnabled {
+		if p.normalisationUseAlbumGain {
+			normalisationFactor = meta.GetAlbumFactor(p.normalisationPregain)
+		} else {
 		normalisationFactor = meta.GetTrackFactor(p.normalisationPregain)
+		}
 	} else {
 		normalisationFactor = 1
 	}
@@ -555,5 +624,5 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 		}
 	}
 
-	return &Stream{Source: stream, Media: media, File: file}, nil
+	return &Stream{PlaybackId: playbackId, Source: stream, Media: media, File: file}, nil
 }

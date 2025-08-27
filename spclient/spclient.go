@@ -12,14 +12,15 @@ import (
 	"strconv"
 	"time"
 
-	playlist4pb "github.com/devgianlu/go-librespot/proto/spotify/playlist4"
-
 	"github.com/cenkalti/backoff/v4"
 	librespot "github.com/devgianlu/go-librespot"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	storagepb "github.com/devgianlu/go-librespot/proto/spotify/download"
-	metadatapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
+	eventsenderpb "github.com/devgianlu/go-librespot/proto/spotify/event_sender"
+	extmetadatapb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
+	netfortunepb "github.com/devgianlu/go-librespot/proto/spotify/netfortune"
 	playerpb "github.com/devgianlu/go-librespot/proto/spotify/player"
+	playlist4pb "github.com/devgianlu/go-librespot/proto/spotify/playlist4"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -69,6 +70,8 @@ func (c *Spclient) innerRequest(ctx context.Context, method string, reqUrl *url.
 	req.Header.Set("Client-Token", c.clientToken)
 
 	if body != nil {
+		req.Header.Set("Content-Type", "application/x-protobuf")
+
 		req.GetBody = func() (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader(body)), nil
 		}
@@ -181,7 +184,7 @@ func (c *Spclient) PutConnectState(ctx context.Context, spotConnId string, reqPr
 			c.log.Debugf("put connect state because %s", reqProto.PutStateReason)
 			return resp, nil
 		}
-	}, backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), 2))
+	}, backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), 2), ctx))
 	if err != nil {
 		return err
 	}
@@ -230,12 +233,13 @@ func (c *Spclient) ResolveStorageInteractive(ctx context.Context, fileId []byte,
 	return &protoResp, nil
 }
 
-func (c *Spclient) MetadataForTrack(ctx context.Context, track librespot.SpotifyId) (*metadatapb.Track, error) {
-	if track.Type() != librespot.SpotifyIdTypeTrack {
-		panic(fmt.Sprintf("invalid type: %s", track.Type()))
+func (c *Spclient) ExtendedMetadata(ctx context.Context, req *extmetadatapb.BatchedEntityRequest) (*extmetadatapb.BatchedExtensionResponse, error) {
+	reqBody, err := proto.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed marshalling BatchedEntityRequest: %w", err)
 	}
 
-	resp, err := c.Request(ctx, "GET", fmt.Sprintf("/metadata/4/track/%s", track.Hex()), nil, nil, nil)
+	resp, err := c.Request(ctx, "POST", "/extended-metadata/v0/extended-metadata", nil, nil, reqBody)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +247,7 @@ func (c *Spclient) MetadataForTrack(ctx context.Context, track librespot.Spotify
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("invalid status code from track metadata: %d", resp.StatusCode)
+		return nil, fmt.Errorf("invalid status code from extended metadata: %d", resp.StatusCode)
 	}
 
 	respBytes, err := io.ReadAll(resp.Body)
@@ -251,41 +255,50 @@ func (c *Spclient) MetadataForTrack(ctx context.Context, track librespot.Spotify
 		return nil, fmt.Errorf("failed reading response body: %w", err)
 	}
 
-	var protoResp metadatapb.Track
+	var protoResp extmetadatapb.BatchedExtensionResponse
 	if err := proto.Unmarshal(respBytes, &protoResp); err != nil {
-		return nil, fmt.Errorf("failed unmarshalling Track: %w", err)
+		return nil, fmt.Errorf("failed unmarshalling BatchedExtensionResponse: %w", err)
 	}
 
 	return &protoResp, nil
 }
 
-func (c *Spclient) MetadataForEpisode(ctx context.Context, episode librespot.SpotifyId) (*metadatapb.Episode, error) {
-	if episode.Type() != librespot.SpotifyIdTypeEpisode {
-		panic(fmt.Sprintf("invalid type: %s", episode.Type()))
-	}
-
-	resp, err := c.Request(ctx, "GET", fmt.Sprintf("/metadata/4/episode/%s", episode.Hex()), nil, nil, nil)
+func (c *Spclient) ExtendedMetadataSimple(ctx context.Context, id librespot.SpotifyId, ext extmetadatapb.ExtensionKind, data proto.Message) error {
+	resp, err := c.ExtendedMetadata(ctx, &extmetadatapb.BatchedEntityRequest{
+		EntityRequest: []*extmetadatapb.EntityRequest{{
+			EntityUri: id.Uri(),
+			Query: []*extmetadatapb.ExtensionQuery{{
+				ExtensionKind: ext,
+			}},
+		}},
+	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	defer func() { _ = resp.Body.Close() }()
+	for _, item := range resp.ExtendedMetadata {
+		if item.ExtensionKind != ext {
+			continue
+		}
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("invalid status code from episode metadata: %d", resp.StatusCode)
+		for _, extData := range item.ExtensionData {
+			if extData.EntityUri != id.Uri() {
+				continue
+			}
+
+			if extData.Header.StatusCode != 200 {
+				return fmt.Errorf("extended metadata request returned status %d", extData.Header.StatusCode)
+			}
+
+			if err := extData.ExtensionData.UnmarshalTo(data); err != nil {
+				return fmt.Errorf("failed unmarshalling extended metadata data: %w", err)
+			}
+
+			return nil
+		}
 	}
 
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed reading response body: %w", err)
-	}
-
-	var protoResp metadatapb.Episode
-	if err := proto.Unmarshal(respBytes, &protoResp); err != nil {
-		return nil, fmt.Errorf("failed unmarshalling Episode: %w", err)
-	}
-
-	return &protoResp, nil
+	return fmt.Errorf("extended metadata with kind %s not found", ext)
 }
 
 func (c *Spclient) PlaylistSignals(ctx context.Context, playlist librespot.SpotifyId, reqProto *playlist4pb.ListSignals, lenses []string) (*playlist4pb.SelectedListContent, error) {
@@ -381,4 +394,61 @@ func (c *Spclient) ContextResolveAutoplay(ctx context.Context, reqProto *playerp
 
 func (c *Spclient) GetAccessToken(ctx context.Context, force bool) (string, error) {
 	return c.accessToken(ctx, force)
+}
+
+func (c *Spclient) NetFortune(ctx context.Context, bandwidth int) (*netfortunepb.NetFortuneV2Response, error) {
+	resp, err := c.Request(ctx, "GET", "/net-fortune/v2/fortune", url.Values{
+		"bandwidth": []string{fmt.Sprintf("%d", bandwidth)},
+	}, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("invalid status code from net fortune: %d", resp.StatusCode)
+	}
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading response body: %w", err)
+	}
+
+	var fortune netfortunepb.NetFortuneV2Response
+	if err := proto.Unmarshal(respBytes, &fortune); err != nil {
+		return nil, fmt.Errorf("failed json unmarshalling NetFortuneV2Response: %w", err)
+	}
+
+	return &fortune, nil
+}
+
+func (c *Spclient) PublishEvents(ctx context.Context, reqProto *eventsenderpb.PublishEventsRequest) (*eventsenderpb.PublishEventsResponse, error) {
+	reqBody, err := proto.Marshal(reqProto)
+	if err != nil {
+		return nil, fmt.Errorf("failed marshalling PublishEventsRequest: %w", err)
+	}
+
+	resp, err := c.Request(ctx, "POST", "/gabo-receiver-service/v3/events/", nil, nil, reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("invalid status code from gabo events receiver: %d", resp.StatusCode)
+	}
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading response body: %w", err)
+	}
+
+	var respProto eventsenderpb.PublishEventsResponse
+	if err := proto.Unmarshal(respBytes, &respProto); err != nil {
+		return nil, fmt.Errorf("failed json unmarshalling PublishEventsResponse: %w", err)
+	}
+
+	return &respProto, nil
 }

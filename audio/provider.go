@@ -112,7 +112,7 @@ func (p *KeyProvider) recvLoop() {
 					hex.EncodeToString(req.fileId), librespot.GidToBase62(req.gid), err)}
 
 				p.log.Errorf("Can't request aes key for file %s, gid: %s, due: %s", hex.EncodeToString(req.fileId), librespot.GidToBase62(req.gid), err)
-				break
+				continue
 			}
 
 			p.log.Debugf("requested aes key for file %s, gid: %s", hex.EncodeToString(req.fileId), librespot.GidToBase62(req.gid))

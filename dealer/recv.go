@@ -231,10 +231,14 @@ func (d *Dealer) handleRequest(rawMsg *RawMessage) {
 
 	// dispatch request
 	resp := make(chan bool)
-	recv.c <- &Request{
+	select {
+	case recv.c <- &Request{
 		resp:         resp,
 		MessageIdent: rawMsg.MessageIdent,
 		Payload:      payload,
+	}:
+	case <-d.stopCh:
+		return
 	}
 
 	// wait for response and send it
